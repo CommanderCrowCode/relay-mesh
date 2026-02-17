@@ -10,6 +10,7 @@ References:
 2. OpenCode config schema (`mcp.local` / `mcp.remote`): https://opencode.ai/config.json
 3. OpenCode Server API (`/session`, `/session/{id}/prompt_async`): https://opencode.ai/docs/server-api/
 4. OpenCode plugin hooks (`tool.execute.before`): https://opencode.ai/docs/plugins/hooks
+5. Relay protocol spec: `/Users/tanwa/relay-mesh/COMMUNICATION_PROTOCOL.md`
 
 ## 1. Start Core Services (Automatic)
 

@@ -12,6 +12,7 @@ Minimal POC for standalone agent messaging foundations:
 - `cmd/server`: MCP server entrypoint
 - `internal/broker`: in-memory agent registry + NATS-backed delivery
 - NATS subjects: `relay.agent.<agent_id>`
+- JetStream stream: `RELAY_MESSAGES` (durable history)
 
 ## Prerequisites
 
@@ -37,6 +38,7 @@ relay-mesh version
 ## OpenCode Auto-Bind Plugin
 
 This repo includes `.opencode/plugins/relay-mesh-auto-bind.js`, which auto-injects current OpenCode `session_id` into `register_agent` tool calls using OpenCode hook `tool.execute.before`.
+It also injects/reinforces communication protocol context on registration and after compaction.
 
 To enable it, add to your OpenCode config (`~/.config/opencode/opencode.json`):
 
@@ -47,6 +49,8 @@ To enable it, add to your OpenCode config (`~/.config/opencode/opencode.json`):
   ]
 }
 ```
+
+Protocol spec: `COMMUNICATION_PROTOCOL.md`
 
 ## Run
 
@@ -119,6 +123,9 @@ make build
 make test
 ```
 
+Advanced real-world validation scenarios:
+- `REAL_WORLD_E2E_TESTS.md`
+
 ## MCP Tools
 
 - `register_agent`
@@ -144,6 +151,10 @@ make test
   - input: `{ "agent_id": "ag-...", "max": "10" }`
   - output: array of queued messages
 
+- `fetch_message_history`
+  - input: `{ "agent_id": "ag-...", "max": "20" }`
+  - output: durable JetStream history for that agent (oldest to newest in returned slice)
+
 - `find_agents`
   - input: `{ "query": "nats", "project": "civitas", "role": "backend engineer", "specialization": "go", "max": "10" }`
   - output: filtered list of agent profiles
@@ -168,6 +179,7 @@ make test
 - If `OPENCODE_URL` is set and recipient has a bound session, `send_message` also pushes to OpenCode session via `prompt_async`.
 - Auto-bind order on `register_agent`: explicit `session_id` input, request header detection, then latest active unbound OpenCode session (best effort).
 - If some metadata is not known at registration, provide `"unknown"` and later refine with `update_agent_profile`.
+- NATS server logs do not include message bodies by default; use `fetch_message_history` for durable per-agent history.
 
 ## Ready-for-Usage Checklist
 

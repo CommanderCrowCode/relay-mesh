@@ -5,14 +5,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/nats-io/nats.go"
 )
 
 const subjectPrefix = "relay.agent"
+const streamName = "RELAY_MESSAGES"
 
 // Message is the minimal NATS message envelope for this POC.
 type Message struct {
@@ -53,6 +56,7 @@ type agentState struct {
 type Broker struct {
 	mu     sync.Mutex
 	nc     *nats.Conn
+	js     nats.JetStreamContext
 	agents map[string]*agentState
 	subs   map[string]*nats.Subscription
 }
@@ -62,8 +66,18 @@ func New(natsURL string) (*Broker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect to nats: %w", err)
 	}
+	js, err := nc.JetStream()
+	if err != nil {
+		_ = nc.Drain()
+		return nil, fmt.Errorf("init jetstream context: %w", err)
+	}
+	if err := ensureStream(js); err != nil {
+		_ = nc.Drain()
+		return nil, err
+	}
 	return &Broker{
 		nc:     nc,
+		js:     js,
 		agents: make(map[string]*agentState),
 		subs:   make(map[string]*nats.Subscription),
 	}, nil
@@ -187,11 +201,53 @@ func (b *Broker) FindAgents(filter AgentSearchFilter) []map[string]string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	out := make([]map[string]string, 0)
+	type candidate struct {
+		agent         *agentState
+		score         int
+		matchedTokens int
+	}
+	all := make([]candidate, 0, len(b.agents))
+	totalTokens := len(tokenize(filter.Query))
+
 	for _, a := range b.agents {
-		if !matchAgent(a.Profile, filter) {
+		score, matchedTokens, ok := matchAgent(a.Profile, filter)
+		if !ok {
 			continue
 		}
+		all = append(all, candidate{agent: a, score: score, matchedTokens: matchedTokens})
+	}
+	if len(all) == 0 {
+		return []map[string]string{}
+	}
+
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].score == all[j].score {
+			return all[i].agent.ID < all[j].agent.ID
+		}
+		return all[i].score > all[j].score
+	})
+
+	primary := make([]candidate, 0, len(all))
+	fallback := make([]candidate, 0, len(all))
+	for _, c := range all {
+		// Query fallback: if no full token match exists, return best fuzzy suggestions.
+		if totalTokens == 0 || c.matchedTokens >= totalTokens {
+			primary = append(primary, c)
+			continue
+		}
+		if c.matchedTokens > 0 {
+			fallback = append(fallback, c)
+		}
+	}
+
+	chosen := primary
+	if len(chosen) == 0 && totalTokens > 0 {
+		chosen = fallback
+	}
+
+	out := make([]map[string]string, 0, min(filter.Limit, len(chosen)))
+	for _, c := range chosen {
+		a := c.agent
 		out = append(out, map[string]string{
 			"id":             a.ID,
 			"name":           a.Profile.Name,
@@ -280,14 +336,60 @@ func (b *Broker) Send(from, to, body string) (Message, error) {
 		return Message{}, fmt.Errorf("marshal message: %w", err)
 	}
 
-	if err := b.nc.Publish(toAgent.Subject, data); err != nil {
-		return Message{}, fmt.Errorf("publish: %w", err)
-	}
-	if err := b.nc.Flush(); err != nil {
-		return Message{}, fmt.Errorf("flush: %w", err)
+	if _, err := b.js.Publish(toAgent.Subject, data); err != nil {
+		return Message{}, fmt.Errorf("jetstream publish: %w", err)
 	}
 
 	return m, nil
+}
+
+func (b *Broker) FetchHistory(agentID string, max int) ([]Message, error) {
+	if max <= 0 {
+		max = 20
+	}
+
+	b.mu.Lock()
+	agent := b.agents[agentID]
+	b.mu.Unlock()
+	if agent == nil {
+		return nil, fmt.Errorf("agent not found: %s", agentID)
+	}
+
+	info, err := b.js.StreamInfo(streamName)
+	if err != nil {
+		return nil, fmt.Errorf("stream info: %w", err)
+	}
+	if info == nil || info.State.Msgs == 0 {
+		return []Message{}, nil
+	}
+
+	out := make([]Message, 0, max)
+	firstSeq := info.State.FirstSeq
+	lastSeq := info.State.LastSeq
+
+	for seq := lastSeq; seq >= firstSeq && len(out) < max; seq-- {
+		stored, err := b.js.GetMsg(streamName, seq)
+		if err != nil {
+			continue
+		}
+		var msg Message
+		if err := json.Unmarshal(stored.Data, &msg); err != nil {
+			continue
+		}
+		if msg.To != agentID {
+			continue
+		}
+		out = append(out, msg)
+		if seq == firstSeq {
+			break
+		}
+	}
+
+	// Return oldest-to-newest for stable consumption.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
 }
 
 func (b *Broker) Broadcast(from, body string, filter AgentSearchFilter) ([]Message, error) {
@@ -304,28 +406,44 @@ func (b *Broker) Broadcast(from, body string, filter AgentSearchFilter) ([]Messa
 		b.mu.Unlock()
 		return nil, fmt.Errorf("sender agent not found: %s", from)
 	}
-	targets := make([]string, 0)
+	type targetCandidate struct {
+		id    string
+		score int
+	}
+	targets := make([]targetCandidate, 0)
+	totalTokens := len(tokenize(filter.Query))
 	for id, a := range b.agents {
 		if id == from {
 			continue
 		}
-		if !matchAgent(a.Profile, filter) {
+		score, matchedTokens, ok := matchAgent(a.Profile, filter)
+		if !ok {
 			continue
 		}
-		targets = append(targets, id)
-		if len(targets) >= filter.Limit {
-			break
+		// Apply same "full match first, fuzzy fallback" strategy as find_agents.
+		if totalTokens > 0 && matchedTokens < totalTokens {
+			score -= 100
 		}
+		targets = append(targets, targetCandidate{id: id, score: score})
 	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].score == targets[j].score {
+			return targets[i].id < targets[j].id
+		}
+		return targets[i].score > targets[j].score
+	})
 	b.mu.Unlock()
 
-	out := make([]Message, 0, len(targets))
+	out := make([]Message, 0, min(filter.Limit, len(targets)))
 	for _, to := range targets {
-		msg, err := b.Send(from, to, body)
+		msg, err := b.Send(from, to.id, body)
 		if err != nil {
 			return out, err
 		}
 		out = append(out, msg)
+		if len(out) >= filter.Limit {
+			break
+		}
 	}
 	return out, nil
 }
@@ -361,6 +479,28 @@ func randomID(prefix string) (string, error) {
 		return "", fmt.Errorf("generate random id: %w", err)
 	}
 	return prefix + "-" + hex.EncodeToString(buf), nil
+}
+
+func ensureStream(js nats.JetStreamContext) error {
+	cfg := &nats.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{subjectPrefix + ".>"},
+		Storage:   nats.FileStorage,
+		Retention: nats.LimitsPolicy,
+		Discard:   nats.DiscardOld,
+		MaxAge:    7 * 24 * time.Hour,
+	}
+
+	if _, err := js.StreamInfo(streamName); err == nil {
+		if _, err := js.UpdateStream(cfg); err != nil {
+			return fmt.Errorf("update jetstream stream: %w", err)
+		}
+		return nil
+	}
+	if _, err := js.AddStream(cfg); err != nil {
+		return fmt.Errorf("add jetstream stream: %w", err)
+	}
+	return nil
 }
 
 func normalizeProfile(p AgentProfile) AgentProfile {
@@ -426,7 +566,7 @@ func normalizeFilter(f AgentSearchFilter) AgentSearchFilter {
 	return f
 }
 
-func matchAgent(p AgentProfile, f AgentSearchFilter) bool {
+func matchAgent(p AgentProfile, f AgentSearchFilter) (int, int, bool) {
 	project := strings.ToLower(p.Project)
 	role := strings.ToLower(p.Role)
 	spec := strings.ToLower(p.Specialization)
@@ -435,27 +575,186 @@ func matchAgent(p AgentProfile, f AgentSearchFilter) bool {
 	gh := strings.ToLower(p.GitHub)
 	branch := strings.ToLower(p.Branch)
 
-	if f.Project != "" && project != f.Project {
-		return false
+	score := 0
+	if f.Project != "" {
+		s, ok := fuzzyFieldMatch(f.Project, project)
+		if !ok {
+			return 0, 0, false
+		}
+		score += 300 + s
 	}
-	if f.Role != "" && role != f.Role {
-		return false
+	if f.Role != "" {
+		s, ok := fuzzyFieldMatch(f.Role, role)
+		if !ok {
+			return 0, 0, false
+		}
+		score += 250 + s
 	}
-	if f.Specialization != "" && spec != f.Specialization {
-		return false
+	if f.Specialization != "" {
+		s, ok := fuzzyFieldMatch(f.Specialization, spec)
+		if !ok {
+			return 0, 0, false
+		}
+		score += 250 + s
 	}
+
+	matchedTokens := 0
 	if f.Query != "" {
+		queryTokens := tokenize(f.Query)
 		hay := []string{name, desc, project, role, spec, gh, branch}
-		found := false
+		for _, token := range queryTokens {
+			best := 0
+			ok := false
+			for _, v := range hay {
+				s, m := fuzzyFieldMatch(token, v)
+				if !m {
+					continue
+				}
+				ok = true
+				if s > best {
+					best = s
+				}
+			}
+			if ok {
+				matchedTokens++
+				score += best
+			}
+		}
+		// Need at least one meaningful hit for query mode.
+		if matchedTokens == 0 {
+			return 0, 0, false
+		}
+		// Prefer fuller matches but still allow fallback suggestions upstream.
+		if matchedTokens < len(queryTokens) {
+			score -= (len(queryTokens) - matchedTokens) * 30
+		}
+	} else {
+		// No free-text query means this candidate should still rank stably.
+		hay := []string{name, desc, project, role, spec, gh, branch}
 		for _, v := range hay {
-			if strings.Contains(v, f.Query) {
-				found = true
+			if strings.TrimSpace(v) != "" {
+				score += 1
 				break
 			}
 		}
-		if !found {
-			return false
+	}
+	return score, matchedTokens, true
+}
+
+func fuzzyFieldMatch(needle, hay string) (int, bool) {
+	needle = strings.ToLower(strings.TrimSpace(needle))
+	hay = strings.ToLower(strings.TrimSpace(hay))
+	if needle == "" || hay == "" {
+		return 0, false
+	}
+	if hay == needle {
+		return 200, true
+	}
+	if strings.HasPrefix(hay, needle) {
+		return 180, true
+	}
+	if strings.Contains(hay, needle) {
+		return 160, true
+	}
+
+	words := tokenize(hay)
+	best := 0
+	for _, w := range words {
+		if w == needle {
+			if 200 > best {
+				best = 200
+			}
+			continue
+		}
+		if strings.HasPrefix(w, needle) || strings.HasPrefix(needle, w) {
+			if 150 > best {
+				best = 150
+			}
+			continue
+		}
+		dist := levenshtein(needle, w)
+		maxDist := allowedDistance(max(len(needle), len(w)))
+		if dist <= maxDist {
+			s := 140 - (dist * 20)
+			if s > best {
+				best = s
+			}
 		}
 	}
-	return true
+	if best > 0 {
+		return best, true
+	}
+	return 0, false
+}
+
+func tokenize(s string) []string {
+	parts := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func allowedDistance(n int) int {
+	switch {
+	case n <= 4:
+		return 1
+	case n <= 8:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func levenshtein(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if len(a) == 0 {
+		return len(b)
+	}
+	if len(b) == 0 {
+		return len(a)
+	}
+
+	prev := make([]int, len(b)+1)
+	curr := make([]int, len(b)+1)
+	for j := 0; j <= len(b); j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		curr[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 0
+			if a[i-1] != b[j-1] {
+				cost = 1
+			}
+			del := prev[j] + 1
+			ins := curr[j-1] + 1
+			sub := prev[j-1] + cost
+			curr[j] = min(del, min(ins, sub))
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(b)]
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

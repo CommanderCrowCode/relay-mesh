@@ -58,6 +58,7 @@ Server must expose MCP tools:
 2. `send_message` publishes envelope to recipient subject.
 3. Recipient queue stores incoming messages in memory for fetch.
 4. `broadcast_message` sends to multiple recipients selected by profile filters.
+5. Messages are persisted to JetStream (`RELAY_MESSAGES`) for durable history inspection.
 
 ### FR-4 Message Envelope
 
@@ -73,6 +74,7 @@ Minimum envelope fields:
 1. `fetch_messages` returns up to `max` queued messages.
 2. Fetch drains returned messages from the in-memory queue.
 3. `max <= 0` defaults to `10`.
+4. `fetch_message_history` returns durable (non-draining) JetStream history with default `max=20`.
 
 ### FR-6 Input Validation
 

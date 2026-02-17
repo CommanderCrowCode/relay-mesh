@@ -24,10 +24,12 @@ func runNATSServer(t *testing.T) *natsserver.Server {
 	t.Helper()
 
 	s, err := natsserver.NewServer(&natsserver.Options{
-		Host:   "127.0.0.1",
-		Port:   -1,
-		NoLog:  true,
-		NoSigs: true,
+		Host:      "127.0.0.1",
+		Port:      -1,
+		NoLog:     true,
+		NoSigs:    true,
+		JetStream: true,
+		StoreDir:  t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("new nats server: %v", err)
@@ -317,6 +319,103 @@ func TestUpdateAndFindAgents(t *testing.T) {
 	}
 }
 
+func TestFindAgentsMultiWordAndTypoTolerance(t *testing.T) {
+	b := newTestBroker(t)
+
+	alpha, err := b.RegisterAgent(AgentProfile{
+		Name:           "payments-backend-1",
+		Description:    "owns payments API contract and schema changes",
+		Project:        "payments",
+		Role:           "backend",
+		Specialization: "go-api",
+	})
+	if err != nil {
+		t.Fatalf("register alpha: %v", err)
+	}
+	beta, err := b.RegisterAgent(AgentProfile{
+		Name:           "checkout-frontend-1",
+		Description:    "implements checkout UI integrations",
+		Project:        "checkout",
+		Role:           "frontend",
+		Specialization: "react",
+	})
+	if err != nil {
+		t.Fatalf("register beta: %v", err)
+	}
+
+	got := b.FindAgents(AgentSearchFilter{
+		Query: "checkout frontend react",
+		Limit: 10,
+	})
+	if len(got) == 0 || got[0]["id"] != beta {
+		t.Fatalf("expected checkout frontend agent first for multi-word query, got %#v", got)
+	}
+	for _, a := range got {
+		if a["id"] == alpha {
+			t.Fatalf("unexpected unrelated result for strict multi-word query: %#v", got)
+		}
+	}
+
+	typo := b.FindAgents(AgentSearchFilter{
+		Query: "chekout fronend raect",
+		Limit: 10,
+	})
+	if len(typo) == 0 || typo[0]["id"] != beta {
+		t.Fatalf("expected typo-tolerant match to return beta first, got %#v", typo)
+	}
+}
+
+func TestFindAgentsFallbackSuggestionsByRelevance(t *testing.T) {
+	b := newTestBroker(t)
+
+	alpha, err := b.RegisterAgent(AgentProfile{
+		Name:           "platform-backend-1",
+		Description:    "handles nats messaging and queue workers",
+		Project:        "platform",
+		Role:           "backend",
+		Specialization: "go-nats",
+	})
+	if err != nil {
+		t.Fatalf("register alpha: %v", err)
+	}
+	beta, err := b.RegisterAgent(AgentProfile{
+		Name:           "platform-frontend-1",
+		Description:    "web console and dashboard",
+		Project:        "platform",
+		Role:           "frontend",
+		Specialization: "react-ui",
+	})
+	if err != nil {
+		t.Fatalf("register beta: %v", err)
+	}
+	if _, err := b.RegisterAgent(AgentProfile{
+		Name:           "docs-writer-1",
+		Description:    "writes docs and guides",
+		Project:        "docs",
+		Role:           "writer",
+		Specialization: "documentation",
+	}); err != nil {
+		t.Fatalf("register docs agent: %v", err)
+	}
+
+	// No full-token match likely exists, so ranking should fall back to fuzzy suggestions.
+	suggestions := b.FindAgents(AgentSearchFilter{
+		Query: "nat mesaging backnd",
+		Limit: 10,
+	})
+	if len(suggestions) == 0 {
+		t.Fatalf("expected fuzzy suggestions, got none")
+	}
+	if suggestions[0]["id"] != alpha {
+		t.Fatalf("expected most relevant suggestion first, got %#v", suggestions[0])
+	}
+	for _, s := range suggestions {
+		if s["id"] == beta && suggestions[0]["id"] == beta {
+			t.Fatalf("frontend should not outrank backend for backend+messaging query: %#v", suggestions)
+		}
+	}
+}
+
 func TestBroadcast(t *testing.T) {
 	b := newTestBroker(t)
 
@@ -364,6 +463,52 @@ func TestBroadcast(t *testing.T) {
 	}
 	if msgs[0].To == frontend {
 		t.Fatalf("frontend should not receive backend-only broadcast")
+	}
+}
+
+func TestFetchHistory(t *testing.T) {
+	b := newTestBroker(t)
+
+	fromID, err := b.RegisterAgent(AgentProfile{
+		Name:           "sender",
+		Description:    "orchestrator",
+		Project:        "civitas",
+		Role:           "lead",
+		Specialization: "coordination",
+	})
+	if err != nil {
+		t.Fatalf("register sender: %v", err)
+	}
+	toID, err := b.RegisterAgent(AgentProfile{
+		Name:           "receiver",
+		Description:    "backend",
+		Project:        "civitas",
+		Role:           "backend",
+		Specialization: "go",
+	})
+	if err != nil {
+		t.Fatalf("register receiver: %v", err)
+	}
+
+	if _, err := b.Send(fromID, toID, "m1"); err != nil {
+		t.Fatalf("send m1: %v", err)
+	}
+	if _, err := b.Send(fromID, toID, "m2"); err != nil {
+		t.Fatalf("send m2: %v", err)
+	}
+	if _, err := b.Send(fromID, toID, "m3"); err != nil {
+		t.Fatalf("send m3: %v", err)
+	}
+
+	history, err := b.FetchHistory(toID, 2)
+	if err != nil {
+		t.Fatalf("fetch history: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("expected 2 history messages, got %d", len(history))
+	}
+	if history[0].Body != "m2" || history[1].Body != "m3" {
+		t.Fatalf("unexpected history order/content: %#v", history)
 	}
 }
 

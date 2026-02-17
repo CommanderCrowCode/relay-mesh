@@ -522,6 +522,12 @@ func buildMCPServer(b *broker.Broker, pusher *opencodepush.Pusher, resolver *ope
 		mcp.WithString("agent_id", mcp.Required(), mcp.Description("Agent id to fetch for.")),
 		mcp.WithString("max", mcp.Description("Max number of messages to fetch (default 10).")),
 	)
+	fetchHistoryTool := mcp.NewTool(
+		"fetch_message_history",
+		mcp.WithDescription("Fetch durable JetStream message history for an agent without draining in-memory queue."),
+		mcp.WithString("agent_id", mcp.Required(), mcp.Description("Agent id to fetch history for.")),
+		mcp.WithString("max", mcp.Description("Max number of historical messages to return (default 20).")),
+	)
 	bindSessionTool := mcp.NewTool(
 		"bind_session",
 		mcp.WithDescription("Bind an agent_id to an OpenCode session_id for automatic push delivery."),
@@ -541,6 +547,7 @@ func buildMCPServer(b *broker.Broker, pusher *opencodepush.Pusher, resolver *ope
 	s.AddTool(sendTool, sendHandler(b, pusher))
 	s.AddTool(broadcastTool, broadcastHandler(b, pusher))
 	s.AddTool(fetchTool, fetchHandler(b))
+	s.AddTool(fetchHistoryTool, fetchHistoryHandler(b))
 	s.AddTool(bindSessionTool, bindSessionHandler(b))
 	s.AddTool(getBindingTool, getSessionBindingHandler(b))
 	return s
@@ -675,6 +682,28 @@ func fetchHandler(b *broker.Broker) server.ToolHandlerFunc {
 		}
 
 		messages, err := b.Fetch(agentID, max)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		body, _ := json.Marshal(messages)
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+func fetchHistoryHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		agentID := req.GetString("agent_id", "")
+		if agentID == "" {
+			return mcp.NewToolResultError("agent_id is required"), nil
+		}
+
+		maxText := req.GetString("max", "20")
+		max, err := strconv.Atoi(maxText)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid max: %s", maxText)), nil
+		}
+
+		messages, err := b.FetchHistory(agentID, max)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
