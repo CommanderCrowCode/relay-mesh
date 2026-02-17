@@ -84,6 +84,32 @@ func TestRegisterSendAndFetch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("register receiver: %v", err)
 	}
+	unnamedID, err := b.RegisterAgent("   ")
+	if err != nil {
+		t.Fatalf("register unnamed agent: %v", err)
+	}
+
+	agents := b.ListAgents()
+	if len(agents) != 3 {
+		t.Fatalf("expected 3 agents, got %d", len(agents))
+	}
+	seenFrom := false
+	seenTo := false
+	seenUnnamed := false
+	for _, a := range agents {
+		if a["id"] == fromID && a["name"] == "alice" {
+			seenFrom = true
+		}
+		if a["id"] == toID && a["name"] == "bob" {
+			seenTo = true
+		}
+		if a["id"] == unnamedID && a["name"] == unnamedID {
+			seenUnnamed = true
+		}
+	}
+	if !seenFrom || !seenTo || !seenUnnamed {
+		t.Fatalf("list_agents missing expected entries: %#v", agents)
+	}
 
 	msg, err := b.Send(fromID, toID, "hello")
 	if err != nil {
@@ -130,6 +156,23 @@ func TestSendRejectsUnknownSender(t *testing.T) {
 		t.Fatal("expected send to fail for unknown sender")
 	}
 	if !strings.Contains(err.Error(), "sender agent not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSendRejectsUnknownTarget(t *testing.T) {
+	b := newTestBroker(t)
+
+	fromID, err := b.RegisterAgent("alice")
+	if err != nil {
+		t.Fatalf("register sender: %v", err)
+	}
+
+	_, err = b.Send(fromID, "ag-missing", "hello")
+	if err == nil {
+		t.Fatal("expected send to fail for unknown target")
+	}
+	if !strings.Contains(err.Error(), "target agent not found") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -16,27 +16,39 @@ Minimal POC for standalone agent messaging foundations:
 ## Prerequisites
 
 - Go 1.25+
-- NATS server
+- Docker (for local NATS via `docker compose`)
 
 ## Run
 
 1. Start NATS:
 
 ```bash
-docker run --rm -p 4222:4222 nats:2
+make nats-up
 ```
 
-2. Build and run MCP server:
+2. Run MCP server:
 
 ```bash
-cd ~/relay-mesh
-go run ./cmd/server
+make run
 ```
 
 3. Optional custom NATS URL:
 
 ```bash
 NATS_URL=nats://127.0.0.1:4222 go run ./cmd/server
+```
+
+4. Stop local NATS:
+
+```bash
+make nats-down
+```
+
+## Build and Test
+
+```bash
+make build
+make test
 ```
 
 ## MCP Tools
@@ -62,3 +74,11 @@ NATS_URL=nats://127.0.0.1:4222 go run ./cmd/server
 - This POC keeps delivery queue in memory.
 - If server restarts, agent registrations and queued messages are lost.
 - This is intentional for a small stepping-stone project.
+
+## Ready-for-Usage Checklist
+
+- `make nats-up` starts NATS successfully.
+- `make run` starts MCP server on stdio.
+- MCP client can register at least two agents with `register_agent`.
+- One agent can `send_message` to another and recipient can `fetch_messages`.
+- `make build` and `make test` both pass.
