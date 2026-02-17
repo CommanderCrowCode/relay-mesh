@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	urlpkg "net/url"
 	"strings"
 	"time"
 
@@ -79,9 +80,36 @@ func (p *Pusher) Push(sessionID, targetAgentID string, msg broker.Message) error
 		"variant": "info",
 	}
 	toastData, _ := json.Marshal(toast)
-	_ = p.postJSONExpect(fmt.Sprintf("%s/tui/show-toast", p.baseURL), toastData, http.StatusOK)
+	toastURL := fmt.Sprintf("%s/tui/show-toast", p.baseURL)
+	if directory, err := p.sessionDirectory(sessionID); err == nil && strings.TrimSpace(directory) != "" {
+		toastURL = toastURL + "?directory=" + urlpkg.QueryEscape(directory)
+	}
+	_ = p.postJSONExpect(toastURL, toastData, http.StatusOK)
 
 	return nil
+}
+
+func (p *Pusher) sessionDirectory(sessionID string) (string, error) {
+	sessionURL := fmt.Sprintf("%s/session/%s", p.baseURL, sessionID)
+	req, err := http.NewRequest(http.MethodGet, sessionURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("session lookup status %d", resp.StatusCode)
+	}
+	var payload struct {
+		Directory string `json:"directory"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2048)).Decode(&payload); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(payload.Directory), nil
 }
 
 func (p *Pusher) postJSONExpect(url string, body []byte, expected int) error {

@@ -17,6 +17,11 @@ func TestPushPostsPromptAsync(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
+		if r.Method == http.MethodGet && r.URL.Path == "/session/sess-1" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"directory":"/Users/tanwa/playground/relay_test"}`))
+			return
+		}
 		gotBody := map[string]any{}
 		defer r.Body.Close()
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
@@ -37,14 +42,17 @@ func TestPushPostsPromptAsync(t *testing.T) {
 		t.Fatalf("push failed: %v", err)
 	}
 
-	if len(paths) < 2 {
-		t.Fatalf("expected at least 2 calls, got %d", len(paths))
+	if len(paths) < 3 {
+		t.Fatalf("expected at least 3 calls, got %d", len(paths))
 	}
 	if paths[0] != "/session/sess-1/prompt_async" {
 		t.Fatalf("unexpected first path: %s", paths[0])
 	}
-	if paths[1] != "/tui/show-toast" {
+	if paths[1] != "/session/sess-1" {
 		t.Fatalf("unexpected second path: %s", paths[1])
+	}
+	if paths[2] != "/tui/show-toast" {
+		t.Fatalf("unexpected third path: %s", paths[2])
 	}
 	parts, ok := bodies[0]["parts"].([]any)
 	if !ok || len(parts) != 1 {
