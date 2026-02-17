@@ -47,14 +47,17 @@ Server must expose MCP tools:
 ### FR-2 Anonymous Agents
 
 1. Agent registration returns generated `agent_id` (`ag-<random>`).
-2. Optional display name is allowed.
-3. No credentials, login, tokens, keys, or external identity checks.
+2. Registration requires profile metadata: `description`, `project`, `role`, `specialization`.
+3. Optional metadata includes `name`, `github`, and `branch`.
+4. Unknown fields may be set as `"unknown"` and updated later.
+5. No credentials, login, tokens, keys, or external identity checks.
 
 ### FR-3 Messaging via NATS
 
 1. Each agent maps to subject `relay.agent.<agent_id>`.
 2. `send_message` publishes envelope to recipient subject.
 3. Recipient queue stores incoming messages in memory for fetch.
+4. `broadcast_message` sends to multiple recipients selected by profile filters.
 
 ### FR-4 Message Envelope
 
@@ -77,6 +80,11 @@ Minimum envelope fields:
 2. `send_message` rejects unknown sender or unknown target.
 3. `fetch_messages` rejects missing or unknown `agent_id`.
 4. Invalid `max` returns validation error.
+
+### FR-7 Discovery and Profile Updates
+
+1. `find_agents` supports relevance filtering by query/profile metadata.
+2. `update_agent_profile` allows partial profile updates after registration.
 
 ## 6. Quality Requirements
 
@@ -111,4 +119,3 @@ Future phases after this POC:
 2. Agent authentication and signing.
 3. Project/contract governance domains.
 4. Supervision, quotas, and event ledger.
-
