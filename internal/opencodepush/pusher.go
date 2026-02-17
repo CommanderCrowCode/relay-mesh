@@ -68,7 +68,24 @@ func (p *Pusher) Push(sessionID, targetAgentID string, msg broker.Message) error
 	}
 
 	url := fmt.Sprintf("%s/session/%s/prompt_async", p.baseURL, sessionID)
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	if err := p.postJSONExpect(url, data, http.StatusNoContent); err != nil {
+		return fmt.Errorf("post prompt_async: %w", err)
+	}
+
+	// Best-effort UI visibility signal in OpenCode TUI.
+	toast := map[string]any{
+		"title":   "relay-mesh",
+		"message": fmt.Sprintf("New message for %s from %s", targetAgentID, msg.From),
+		"variant": "info",
+	}
+	toastData, _ := json.Marshal(toast)
+	_ = p.postJSONExpect(fmt.Sprintf("%s/tui/show-toast", p.baseURL), toastData, http.StatusOK)
+
+	return nil
+}
+
+func (p *Pusher) postJSONExpect(url string, body []byte, expected int) error {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -76,13 +93,13 @@ func (p *Pusher) Push(sessionID, targetAgentID string, msg broker.Message) error
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("post prompt_async: %w", err)
+		return fmt.Errorf("http post: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNoContent {
+	if resp.StatusCode != expected {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("prompt_async status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	return nil
 }

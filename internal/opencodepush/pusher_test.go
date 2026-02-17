@@ -12,14 +12,20 @@ import (
 )
 
 func TestPushPostsPromptAsync(t *testing.T) {
-	var gotPath string
-	var gotBody map[string]any
+	var paths []string
+	var bodies []map[string]any
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
+		paths = append(paths, r.URL.Path)
+		gotBody := map[string]any{}
 		defer r.Body.Close()
 		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
 			t.Fatalf("decode body: %v", err)
+		}
+		bodies = append(bodies, gotBody)
+		if r.URL.Path == "/tui/show-toast" {
+			w.WriteHeader(http.StatusOK)
+			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -31,12 +37,18 @@ func TestPushPostsPromptAsync(t *testing.T) {
 		t.Fatalf("push failed: %v", err)
 	}
 
-	if gotPath != "/session/sess-1/prompt_async" {
-		t.Fatalf("unexpected path: %s", gotPath)
+	if len(paths) < 2 {
+		t.Fatalf("expected at least 2 calls, got %d", len(paths))
 	}
-	parts, ok := gotBody["parts"].([]any)
+	if paths[0] != "/session/sess-1/prompt_async" {
+		t.Fatalf("unexpected first path: %s", paths[0])
+	}
+	if paths[1] != "/tui/show-toast" {
+		t.Fatalf("unexpected second path: %s", paths[1])
+	}
+	parts, ok := bodies[0]["parts"].([]any)
 	if !ok || len(parts) != 1 {
-		t.Fatalf("unexpected parts payload: %#v", gotBody["parts"])
+		t.Fatalf("unexpected parts payload: %#v", bodies[0]["parts"])
 	}
 	part, ok := parts[0].(map[string]any)
 	if !ok {
@@ -64,4 +76,3 @@ func TestPushReturnsErrorOnNon204(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
-
