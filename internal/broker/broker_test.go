@@ -580,3 +580,147 @@ func TestBindSessionRejectsUnknownAgent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestRegisterOrUpdateBySession(t *testing.T) {
+	b := newTestBroker(t)
+
+	profile := AgentProfile{
+		Name:           "alpha",
+		Description:    "backend services",
+		Project:        "relay-mesh",
+		Role:           "developer",
+		Specialization: "go-backend",
+	}
+
+	// First registration with a session_id creates a new agent.
+	id1, created, err := b.RegisterOrUpdateBySession("sess-abc", profile)
+	if err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+	if !created {
+		t.Fatal("expected created=true for first registration")
+	}
+	if !strings.HasPrefix(id1, "ag-") {
+		t.Fatalf("expected ag- prefix, got %q", id1)
+	}
+
+	// Re-register with SAME session_id but different profile fields.
+	updatedProfile := AgentProfile{
+		Name:           "alpha-v2",
+		Description:    "updated backend services",
+		Project:        "relay-mesh",
+		Role:           "developer",
+		Specialization: "distributed-systems",
+	}
+	id2, created2, err := b.RegisterOrUpdateBySession("sess-abc", updatedProfile)
+	if err != nil {
+		t.Fatalf("second register: %v", err)
+	}
+	if created2 {
+		t.Fatal("expected created=false for dedup registration")
+	}
+	if id2 != id1 {
+		t.Fatalf("expected same agent ID, got %q vs %q", id2, id1)
+	}
+
+	// Verify only 1 agent exists, with updated profile.
+	agents := b.ListAgents()
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if agents[0]["name"] != "alpha-v2" {
+		t.Fatalf("expected updated name, got %q", agents[0]["name"])
+	}
+	if agents[0]["specialization"] != "distributed-systems" {
+		t.Fatalf("expected updated specialization, got %q", agents[0]["specialization"])
+	}
+
+	// Verify session binding is preserved.
+	sessionID, ok := b.GetSessionBinding(id1)
+	if !ok {
+		t.Fatal("expected session binding to exist after dedup")
+	}
+	if sessionID != "sess-abc" {
+		t.Fatalf("expected session sess-abc, got %q", sessionID)
+	}
+}
+
+func TestRegisterOrUpdateBySession_EmptySession(t *testing.T) {
+	b := newTestBroker(t)
+
+	profile := AgentProfile{
+		Name:           "beta",
+		Description:    "frontend services",
+		Project:        "relay-mesh",
+		Role:           "developer",
+		Specialization: "react",
+	}
+
+	// Empty session_id should create new agents each time.
+	id1, created1, err := b.RegisterOrUpdateBySession("", profile)
+	if err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+	if !created1 {
+		t.Fatal("expected created=true")
+	}
+
+	id2, created2, err := b.RegisterOrUpdateBySession("", profile)
+	if err != nil {
+		t.Fatalf("second register: %v", err)
+	}
+	if !created2 {
+		t.Fatal("expected created=true for second empty-session register")
+	}
+	if id1 == id2 {
+		t.Fatal("expected different agent IDs for empty session registrations")
+	}
+
+	agents := b.ListAgents()
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(agents))
+	}
+}
+
+func TestProjectNameNormalization(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"Small Business Inventory", "small-business-inventory"},
+		{"SmallBusinessInventory", "small-business-inventory"},
+		{"inventory-management", "inventory-management"},
+		{"inventory_management", "inventory-management"},
+		{"  relay-mesh  ", "relay-mesh"},
+		{"HTTPServer", "http-server"},
+		{"myAPIProject", "my-api-project"},
+		{"already-normalized", "already-normalized"},
+		{"Multiple   Spaces", "multiple-spaces"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		got := normalizeProjectName(tc.input)
+		if got != tc.want {
+			t.Errorf("normalizeProjectName(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+
+	// Verify it's applied during registration.
+	b := newTestBroker(t)
+	id, err := b.RegisterAgent(AgentProfile{
+		Name:           "test",
+		Description:    "test agent",
+		Project:        "SmallBusinessInventory",
+		Role:           "developer",
+		Specialization: "testing",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	agents := b.ListAgents()
+	for _, a := range agents {
+		if a["id"] == id && a["project"] != "small-business-inventory" {
+			t.Fatalf("expected normalized project, got %q", a["project"])
+		}
+	}
+}

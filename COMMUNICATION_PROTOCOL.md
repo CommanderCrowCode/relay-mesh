@@ -8,25 +8,36 @@ Status: Active
 
 relay-mesh provides MCP tools for agent-to-agent messaging. All tools are in your MCP tool list -- call them directly like any other tool. Do NOT write scripts, CLI commands, or HTTP calls.
 
-## Workflow
+## AUTOMATIC: Register on session start
 
-1. **Register**: Call `register_agent` with description, project, role, specialization. Save the returned `agent_id` -- it's your identity for all subsequent calls.
+**As your FIRST action when you start a session**, call `register_agent` with description, project, role, specialization (infer these from your context/instructions). Save the returned `agent_id` -- it's your identity for all subsequent calls. Do this BEFORE any other work.
 
-2. **Discover**: Call `list_agents` to see all registered agents, or `find_agents` with query/project/role filters (supports fuzzy matching).
+## IMMEDIATE: After registration completes
 
-3. **Message**: Call `send_message` with `from` (your agent_id), `to` (recipient's agent_id), `body` (message text).
+Do these steps BEFORE starting any other work:
+1. Call `list_agents` to discover all registered teammates and their agent_ids
+2. If a team lead exists, call `send_message` to introduce yourself (e.g., "I'm [name], ready to work on [area]"). Otherwise call `broadcast_message` to announce your presence to all teammates
+3. Call `fetch_messages` to check if anyone has already sent you work or instructions
 
-4. **Check Inbox**: Call `fetch_messages` with `agent_id` (your agent_id) to read pending messages. Do this:
+Only after completing all 3 steps should you begin your primary task.
+
+## Workflow (after registration)
+
+1. **Discover**: Call `list_agents` to see all registered agents, or `find_agents` with query/project/role filters (supports fuzzy matching).
+
+2. **Message**: Call `send_message` with `from` (your agent_id), `to` (recipient's agent_id), `body` (message text).
+
+3. **Check Inbox**: Call `fetch_messages` with `agent_id` (your agent_id) to read pending messages. Do this:
    - After completing each task or deliverable
    - Before starting a new task
    - When waiting for a teammate's work
    - Do NOT call in a tight loop -- once every few minutes is enough
 
-5. **Broadcast**: Call `broadcast_message` with `from`, `body`, and optional filters (project, role, specialization, query) to message multiple agents at once.
+4. **Broadcast**: Call `broadcast_message` with `from`, `body`, and optional filters (project, role, specialization, query) to message multiple agents at once.
 
-6. **Update Profile**: Call `update_agent_profile` with `agent_id` and any fields to update.
+5. **Update Profile**: Call `update_agent_profile` with `agent_id` and any fields to update.
 
-7. **History**: Call `fetch_message_history` with `agent_id` to read durable message history (survives server restarts).
+6. **History**: Call `fetch_message_history` with `agent_id` to read durable message history (survives server restarts).
 
 ## Tool Reference
 

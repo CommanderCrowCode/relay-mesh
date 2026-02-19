@@ -55,11 +55,12 @@ type agentState struct {
 
 // Broker stores anonymous agent routing state and uses NATS as transport.
 type Broker struct {
-	mu     sync.Mutex
-	nc     *nats.Conn
-	js     nats.JetStreamContext
-	agents map[string]*agentState
-	subs   map[string]*nats.Subscription
+	mu           sync.Mutex
+	nc           *nats.Conn
+	js           nats.JetStreamContext
+	agents       map[string]*agentState
+	subs         map[string]*nats.Subscription
+	sessionIndex map[string]string // session_id → agent_id
 }
 
 func New(natsURL string) (*Broker, error) {
@@ -77,10 +78,11 @@ func New(natsURL string) (*Broker, error) {
 		return nil, err
 	}
 	return &Broker{
-		nc:     nc,
-		js:     js,
-		agents: make(map[string]*agentState),
-		subs:   make(map[string]*nats.Subscription),
+		nc:           nc,
+		js:           js,
+		agents:       make(map[string]*agentState),
+		subs:         make(map[string]*nats.Subscription),
+		sessionIndex: make(map[string]string),
 	}, nil
 }
 
@@ -143,6 +145,63 @@ func (b *Broker) RegisterAgent(profile AgentProfile) (string, error) {
 	b.agents[id] = state
 	b.subs[id] = sub
 	return id, nil
+}
+
+func (b *Broker) RegisterOrUpdateBySession(sessionID string, profile AgentProfile) (agentID string, created bool, err error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		id, err := b.RegisterAgent(profile)
+		return id, true, err
+	}
+
+	b.mu.Lock()
+	existingID, found := b.sessionIndex[sessionID]
+	if found {
+		agent := b.agents[existingID]
+		if agent == nil {
+			// Stale index entry; remove and treat as new.
+			delete(b.sessionIndex, sessionID)
+			b.mu.Unlock()
+
+			id, err := b.RegisterAgent(profile)
+			if err != nil {
+				return "", false, err
+			}
+			b.mu.Lock()
+			b.sessionIndex[sessionID] = id
+			if a := b.agents[id]; a != nil {
+				a.SessionID = sessionID
+			}
+			b.mu.Unlock()
+			return id, true, nil
+		}
+
+		// Dedup: update existing agent's profile.
+		applyProfilePatch(&agent.Profile, profile)
+		agent.Profile = normalizeProfile(agent.Profile)
+		if err := validateProfile(agent.Profile); err != nil {
+			b.mu.Unlock()
+			return "", false, err
+		}
+		// Re-bind session to preserve harness binding.
+		agent.SessionID = sessionID
+		b.mu.Unlock()
+		return existingID, false, nil
+	}
+	b.mu.Unlock()
+
+	// New session — register normally then index.
+	id, err := b.RegisterAgent(profile)
+	if err != nil {
+		return "", false, err
+	}
+	b.mu.Lock()
+	b.sessionIndex[sessionID] = id
+	if a := b.agents[id]; a != nil {
+		a.SessionID = sessionID
+	}
+	b.mu.Unlock()
+	return id, true, nil
 }
 
 func (b *Broker) ListAgents() []map[string]string {
@@ -522,12 +581,45 @@ func ensureStream(js nats.JetStreamContext) error {
 func normalizeProfile(p AgentProfile) AgentProfile {
 	p.Name = strings.TrimSpace(p.Name)
 	p.Description = strings.TrimSpace(p.Description)
-	p.Project = strings.TrimSpace(p.Project)
+	p.Project = normalizeProjectName(p.Project)
 	p.Role = strings.TrimSpace(p.Role)
 	p.GitHub = strings.TrimSpace(p.GitHub)
 	p.Branch = strings.TrimSpace(p.Branch)
 	p.Specialization = strings.TrimSpace(p.Specialization)
 	return p
+}
+
+func normalizeProjectName(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+
+	// Insert hyphens at camelCase/PascalCase boundaries.
+	runes := []rune(s)
+	var buf strings.Builder
+	for i, r := range runes {
+		if i > 0 && unicode.IsUpper(r) {
+			prev := runes[i-1]
+			if unicode.IsLower(prev) {
+				buf.WriteRune('-')
+			} else if unicode.IsUpper(prev) && i+1 < len(runes) && unicode.IsLower(runes[i+1]) {
+				buf.WriteRune('-')
+			}
+		}
+		buf.WriteRune(r)
+	}
+	s = buf.String()
+
+	s = strings.ToLower(s)
+	s = strings.ReplaceAll(s, " ", "-")
+	s = strings.ReplaceAll(s, "_", "-")
+
+	for strings.Contains(s, "--") {
+		s = strings.ReplaceAll(s, "--", "-")
+	}
+	s = strings.Trim(s, "-")
+	return s
 }
 
 func validateProfile(p AgentProfile) error {

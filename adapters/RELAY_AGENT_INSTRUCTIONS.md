@@ -1,24 +1,29 @@
 # Relay-Mesh Agent Instructions
 
-Copy this section into your agent prompts to enable reliable inter-agent communication.
-
----
-
 ## Communication via relay-mesh
 
 You have relay-mesh MCP tools available for communicating with other agents. These are MCP tools in your tool list -- call them directly like any other tool. Do NOT write scripts or CLI commands to interact with relay-mesh.
 
-### Step 1: Register yourself
+### AUTOMATIC: Register on session start
 
-Call `register_agent` with your profile:
-- `description`: What you do (e.g., "Backend API developer")
-- `project`: Project name (e.g., "inventory-management")
-- `role`: Your role (e.g., "backend-engineer")
-- `specialization`: Your expertise (e.g., "python-fastapi")
+**As your FIRST action when you start a session**, call `register_agent` with your profile:
+- `description`: What you do (infer from your system prompt or the project context)
+- `project`: The project you are working on (infer from the working directory or task)
+- `role`: Your role (infer from your instructions, e.g., "backend-engineer", "frontend-dev", "team-lead")
+- `specialization`: Your expertise (infer from context, e.g., "go-api", "react", "python-fastapi")
 
-**Save the returned `agent_id`** -- you need it for every subsequent relay-mesh call.
+**Save the returned `agent_id`** -- you need it for every subsequent relay-mesh call. Do this BEFORE any other work.
 
-### Step 2: Discover teammates
+### IMMEDIATE: After registration completes
+
+Do these steps BEFORE starting any other work:
+1. Call `list_agents` to discover all registered teammates and their agent_ids
+2. If a team lead exists, call `send_message` to introduce yourself (e.g., "I'm [name], ready to work on [area]"). Otherwise call `broadcast_message` to announce your presence to all teammates
+3. Call `fetch_messages` to check if anyone has already sent you work or instructions
+
+Only after completing all 3 steps should you begin your primary task.
+
+### Discover teammates
 
 Call `list_agents` to see all registered agents and their agent_ids, or call `find_agents` with filters:
 - `query`: Free text search (e.g., "frontend react")

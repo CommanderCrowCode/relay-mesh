@@ -6,10 +6,22 @@ relay-mesh: Agent-to-Agent Messaging via MCP Tools
 IMPORTANT: relay-mesh tools are MCP tools in your tool list. Call them directly like any other tool.
 Do NOT write scripts, CLI commands, or HTTP calls to interact with relay-mesh or NATS.
 
-## Your Identity
-Your agent_id was returned by register_agent. Use it as "from" in every send/broadcast and as "agent_id" in every fetch.
+## AUTOMATIC: Register on session start
+As your FIRST action, call register_agent with:
+- description: what you do (infer from your prompt/context)
+- project: the project name (infer from working directory or task)
+- role: your role (infer from your instructions)
+- specialization: your expertise (infer from context)
+Save the returned agent_id — you need it for ALL subsequent relay-mesh calls. Do this BEFORE any other work.
 
-## Core Workflow
+## IMMEDIATE: After registration completes
+Do these steps BEFORE starting any other work:
+1. Call list_agents to discover all registered teammates and their agent_ids
+2. If a team lead exists, call send_message to introduce yourself (e.g., "I'm [name], ready to work on [area]"). Otherwise call broadcast_message to announce your presence to all teammates
+3. Call fetch_messages to check if anyone has already sent you work or instructions
+Only after completing all 3 steps should you begin your primary task.
+
+## Core Workflow (after registration)
 1. DISCOVER teammates: call list_agents or find_agents(query="backend") to get their agent_ids
 2. SEND messages: call send_message(from=your_agent_id, to=recipient_agent_id, body="...")
 3. CHECK INBOX: call fetch_messages(agent_id=your_agent_id) to read pending messages
@@ -96,6 +108,13 @@ export const RelayMeshAutoBind = async ({ client }) => {
         protocolInjectedBySession.add(sessionID);
         await maybeInjectProtocolContext(client, sessionID, `register_agent:${agentID}`);
       }
+    },
+
+    "experimental.chat.system.transform": async (_input, output) => {
+      if (!Array.isArray(output.system)) {
+        output.system = [];
+      }
+      output.system.push(`[relay-mesh protocol context]\n${PROTOCOL_CONTEXT}`);
     },
 
     "experimental.session.compacting": async (_input, output) => {

@@ -472,17 +472,61 @@ func installOpenCodePlugin() error {
 		}
 	}
 
+	pluginFound := false
 	for _, v := range pluginList {
 		if s, ok := v.(string); ok && s == pluginPath {
-			fmt.Printf("OpenCode plugin already installed: %s\n", pluginPath)
-			return nil
+			pluginFound = true
+			break
+		}
+	}
+	if !pluginFound {
+		pluginList = append(pluginList, pluginPath)
+		cfg["plugin"] = pluginList
+	}
+
+	// Ensure instructions array includes RELAY_AGENT_INSTRUCTIONS.md
+	instructionsPath := filepath.Join(filepath.Dir(pluginPath), "..", "..", "adapters", "RELAY_AGENT_INSTRUCTIONS.md")
+	if absInstr, err := filepath.Abs(instructionsPath); err == nil {
+		if _, err := os.Stat(absInstr); err == nil {
+			instrList := []any{}
+			if raw, ok := cfg["instructions"]; ok {
+				if arr, ok := raw.([]any); ok {
+					instrList = arr
+				}
+			}
+			found := false
+			for _, v := range instrList {
+				if s, ok := v.(string); ok && s == absInstr {
+					found = true
+					break
+				}
+			}
+			if !found {
+				instrList = append(instrList, absInstr)
+				cfg["instructions"] = instrList
+			}
 		}
 	}
 
-	pluginList = append(pluginList, pluginPath)
-	cfg["plugin"] = pluginList
+	// Ensure MCP server entry exists
+	mcpMap := map[string]any{}
+	if raw, ok := cfg["mcp"]; ok {
+		if m, ok := raw.(map[string]any); ok {
+			mcpMap = m
+		}
+	}
+	if _, ok := mcpMap["relay-mesh"]; !ok {
+		port := getenv("RELAY_MESH_HTTP_PORT", "18808")
+		mcpMap["relay-mesh"] = map[string]any{
+			"type":    "remote",
+			"url":     fmt.Sprintf("http://127.0.0.1:%s/mcp", port),
+			"enabled": true,
+			"timeout": 15000,
+		}
+		cfg["mcp"] = mcpMap
+	}
 
-	// Keep existing file stable except for plugin insertion.
+	// Keep existing file stable except for our additions.
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -615,13 +659,22 @@ const claudeRelayProtocol = `# Relay-Mesh Protocol Context
 
 You are connected to relay-mesh for agent-to-agent messaging. All tools below are MCP tools in your tool list -- call them directly.
 
-## Workflow
-1. Register: Call register_agent (description, project, role, specialization required). Save the returned agent_id.
-2. Discover: Call list_agents or find_agents (supports fuzzy search) to find teammates.
-3. Message: Call send_message (from=your_agent_id, to=recipient_agent_id, body=message).
-4. Check Inbox: Call fetch_messages (agent_id=your_agent_id) after each task, before starting new work, or when waiting.
-5. Broadcast: Call broadcast_message (from, body, optional: project/role/query filters).
-6. Update Profile: Call update_agent_profile when your info changes.
+## AUTOMATIC: Register on session start
+As your FIRST action, call register_agent with description, project, role, specialization (infer from your context). Save the returned agent_id -- you need it for ALL subsequent calls. Do this BEFORE any other work.
+
+## Workflow (after registration)
+1. Discover: Call list_agents or find_agents (supports fuzzy search) to find teammates.
+2. Message: Call send_message (from=your_agent_id, to=recipient_agent_id, body=message).
+3. Check Inbox: Call fetch_messages (agent_id=your_agent_id) after each task, before starting new work, or when waiting.
+4. Broadcast: Call broadcast_message (from, body, optional: project/role/query filters).
+5. Update Profile: Call update_agent_profile when your info changes.
+
+## IMMEDIATE: After registration completes
+You MUST do these steps before starting any other work:
+1. Call list_agents to discover all registered teammates
+2. Call send_message to introduce yourself to the team lead (or broadcast_message if no lead found)
+3. Call fetch_messages to check if anyone has already assigned you work
+Only after completing these 3 steps should you begin your primary task.
 
 ## When to Check Messages
 - After completing each task or deliverable
@@ -1195,7 +1248,7 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 		"find_agents",
 		mcp.WithDescription("Find relevant agents by query/profile filters."),
 		mcp.WithString("query", mcp.Description("Free text search across profile fields.")),
-		mcp.WithString("project", mcp.Description("Exact project filter.")),
+		mcp.WithString("project", mcp.Description("Project filter (fuzzy matching).")),
 		mcp.WithString("role", mcp.Description("Exact role filter.")),
 		mcp.WithString("specialization", mcp.Description("Exact specialization filter.")),
 		mcp.WithString("max", mcp.Description("Max number of agents to return (default 20).")),
@@ -1267,10 +1320,6 @@ func registerHandler(b *broker.Broker, resolver *opencodepush.SessionResolver) s
 			Branch:         req.GetString("branch", ""),
 			Specialization: req.GetString("specialization", ""),
 		}
-		id, err := b.RegisterAgent(profile)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
 
 		// Detect harness type
 		harness := strings.TrimSpace(req.GetString("harness", ""))
@@ -1278,9 +1327,7 @@ func registerHandler(b *broker.Broker, resolver *opencodepush.SessionResolver) s
 			harness = detectHarness()
 		}
 
-		slog.Info("agent registered", "agent_id", id, "name", profile.Name, "project", profile.Project, "role", profile.Role)
-
-		out := map[string]string{"agent_id": id}
+		// Detect session_id EARLY (before register call)
 		sessionID := strings.TrimSpace(req.GetString("session_id", ""))
 		if sessionID == "" {
 			sessionID = detectSessionID(req.Header)
@@ -1294,7 +1341,30 @@ func registerHandler(b *broker.Broker, resolver *opencodepush.SessionResolver) s
 				sessionID = autoSessionID
 			}
 		}
+
+		var id string
+		var created bool
 		if sessionID != "" {
+			var err error
+			id, created, err = b.RegisterOrUpdateBySession(sessionID, profile)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+		} else {
+			var err error
+			id, err = b.RegisterAgent(profile)
+			if err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			created = true
+		}
+
+		slog.Info("agent registered", "agent_id", id, "new", created, "name", profile.Name, "project", profile.Project, "role", profile.Role)
+
+		out := map[string]string{"agent_id": id}
+		if sessionID != "" {
+			// RegisterOrUpdateBySession already binds the session internally,
+			// but we still need to set the harness via BindSession.
 			if err := b.BindSession(id, sessionID, harness); err == nil {
 				out["session_id"] = sessionID
 				out["harness"] = harness
