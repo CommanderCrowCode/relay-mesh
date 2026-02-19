@@ -17,7 +17,7 @@ run:
 	go run ./cmd/server
 
 run-http:
-	MCP_TRANSPORT=http MCP_HTTP_ADDR=127.0.0.1:8080 MCP_HTTP_PATH=/mcp go run ./cmd/server
+	MCP_TRANSPORT=http MCP_HTTP_ADDR=127.0.0.1:18808 MCP_HTTP_PATH=/mcp go run ./cmd/server
 
 opencode-mesh-up:
 	./scripts/opencode-mesh-up.sh

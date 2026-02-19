@@ -1,120 +1,176 @@
 # relay-mesh
 
-Minimal POC for standalone agent messaging foundations:
+Agent-to-agent messaging over NATS, exposed as MCP tools. Works with OpenCode, Claude Code, and other MCP-compatible AI agent harnesses.
 
-- MCP server (stdio)
-- Agent-to-agent messaging over NATS
-- No identity management (anonymous agent IDs)
-- Agents interact only through MCP tools
+## How It Works
 
-## Architecture
+Each AI agent session connects to relay-mesh via MCP (stdio or HTTP). Agents register a profile, discover each other, and exchange messages -- all through MCP tool calls. Messages are transported via NATS JetStream with durable history.
 
-- `cmd/server`: MCP server entrypoint
-- `internal/broker`: in-memory agent registry + NATS-backed delivery
-- NATS subjects: `relay.agent.<agent_id>`
-- JetStream stream: `RELAY_MESSAGES` (durable history)
+```
+Agent A (OpenCode)  ──┐
+                      ├── MCP ──> relay-mesh ──> NATS JetStream
+Agent B (Claude Code) ─┘
+```
 
 ## Prerequisites
 
 - Go 1.25+
-- Docker (for local NATS via `docker compose`)
+- Docker (for local NATS)
 
-## Install (Versioned)
-
-Install a versioned binary tied to git commit metadata:
+## Install
 
 ```bash
+cd /path/to/relay-mesh
 make install
 ```
 
-`make install` also installs the OpenCode auto-bind plugin into your OpenCode config if not already present.
+This builds the `relay-mesh` binary to `~/.local/bin/` with version metadata.
 
-Check installed version:
+Verify:
 
 ```bash
 relay-mesh version
 ```
 
-## OpenCode Auto-Bind Plugin
+## Setup by Harness
 
-This repo includes `.opencode/plugins/relay-mesh-auto-bind.js`, which auto-injects current OpenCode `session_id` into `register_agent` tool calls using OpenCode hook `tool.execute.before`.
-It also injects/reinforces communication protocol context on registration and after compaction.
+### OpenCode
 
-To enable it, add to your OpenCode config (`~/.config/opencode/opencode.json`):
+`make install` also registers the auto-bind plugin. To set up manually:
+
+```bash
+relay-mesh install-opencode-plugin
+```
+
+This adds the plugin path to `~/.config/opencode/opencode.json`. The plugin auto-injects `session_id` into `register_agent` calls and reinforces protocol context after compaction.
+
+You also need to add relay-mesh as an MCP server in your OpenCode config (`~/.config/opencode/opencode.json`):
 
 ```json
 {
-  "plugin": [
-    "/Users/tanwa/relay-mesh/.opencode/plugins/relay-mesh-auto-bind.js"
-  ]
+  "mcp": {
+    "relay-mesh": {
+      "type": "remote",
+      "url": "http://127.0.0.1:18808/mcp",
+      "enabled": true,
+      "timeout": 15000
+    }
+  }
 }
 ```
 
-Protocol spec: `COMMUNICATION_PROTOCOL.md`
-
-## Run
-
-One command orchestration (recommended):
+### Claude Code
 
 ```bash
-relay-mesh mesh-up
+cd /path/to/your/project
+relay-mesh install-claude-code
 ```
 
-Stop managed services:
+Options:
+- `--transport=stdio` (default) -- each Claude Code session spawns its own relay-mesh process
+- `--transport=http` -- all sessions share one relay-mesh server (auto-finds a free port starting at 18808)
+- `--project-dir=/path` -- target a different project directory
+
+To remove:
 
 ```bash
-relay-mesh mesh-down
+relay-mesh uninstall-claude-code
 ```
 
-1. Start NATS:
+## Running
+
+### Start everything
 
 ```bash
-make nats-up
+relay-mesh up
 ```
 
-2. Run MCP server:
+Starts NATS (Docker), OpenCode server API, and the relay-mesh HTTP MCP server. Reuses already-running services. Port is auto-selected starting at 18808.
+
+### Stop everything
 
 ```bash
-make run
+relay-mesh down
 ```
 
-For shared multi-client mesh (single MCP instance over HTTP):
+### Manual start (stdio mode)
+
+If using stdio transport (e.g., Claude Code default), the harness spawns relay-mesh automatically. You only need NATS running:
 
 ```bash
-make run-http
+docker run -d --name relay-mesh-nats -p 4222:4222 nats:2.11-alpine -js
 ```
 
-Default URL: `http://127.0.0.1:8080/mcp`
+## Usage
 
-For OpenCode shared mesh + push with auto-start/reuse:
+### 1. Register your agent
 
-```bash
-make opencode-mesh-up
+In each AI session, ask the agent to call `register_agent`:
+
+```
+Register with relay-mesh: description="backend API owner", project="my-app", role="backend engineer", specialization="go+nats"
 ```
 
-To enable OpenCode push injection from server:
+The agent gets back an `agent_id` (e.g., `ag-a1b2c3`). Session binding happens automatically via harness plugins/hooks.
 
-```bash
-OPENCODE_URL=http://127.0.0.1:4097 make run-http
+### 2. Discover other agents
+
+```
+Use find_agents to search for agents on project "my-app"
 ```
 
-3. Optional custom NATS URL:
+Supports fuzzy matching -- typos like "bakend" still find "backend". Multi-word queries and exact field filters (project, role, specialization) also work.
 
-```bash
-NATS_URL=nats://127.0.0.1:4222 go run ./cmd/server
+### 3. Send messages
+
+```
+Use send_message to send "Can you review the auth module?" to agent ag-xyz
 ```
 
-4. Stop local NATS:
+If the recipient has a bound session, relay-mesh pushes the message directly into their harness (OpenCode toast, Claude Code state file + notification). Otherwise the message queues for `fetch_messages`.
 
-```bash
-make nats-down
+### 4. Broadcast
+
+```
+Use broadcast_message to all agents on project "my-app" with body "standup: what's everyone working on?"
 ```
 
-To stop all auto-started OpenCode mesh services:
+### 5. Update profile
 
-```bash
-make opencode-mesh-down
 ```
+Use update_agent_profile to update my specialization to "distributed-systems"
+```
+
+## MCP Tools
+
+| Tool | Required Inputs | Description |
+|------|----------------|-------------|
+| `register_agent` | description, project, role, specialization | Register agent profile, get agent_id |
+| `list_agents` | -- | List all registered agents |
+| `find_agents` | -- | Search by query/project/role/specialization (fuzzy) |
+| `update_agent_profile` | agent_id | Update profile fields |
+| `send_message` | from, to, body | Direct message to an agent |
+| `broadcast_message` | from, body | Message agents matching filters |
+| `fetch_messages` | agent_id | Pull pending messages |
+| `fetch_message_history` | agent_id | Read durable JetStream history |
+| `bind_session` | agent_id, session_id | Bind agent to harness session |
+| `get_session_binding` | agent_id | Check current session binding |
+
+## Architecture
+
+```
+cmd/server/          CLI + MCP tool handlers
+internal/broker/     Agent registry, message routing, NATS JetStream
+internal/push/       Push adapter interface + per-harness implementations
+internal/opencodepush/  OpenCode prompt_async push (legacy, being migrated)
+.opencode/plugins/   OpenCode auto-bind plugin
+adapters/claude-code/  Claude Code hook scripts + protocol context
+```
+
+- NATS subjects: `relay.agent.<agent_id>`
+- JetStream stream: `RELAY_MESSAGES`
+- State is in-memory; server restart clears registrations and queued messages
+- Durable message history survives restarts via JetStream
 
 ## Build and Test
 
@@ -123,68 +179,12 @@ make build
 make test
 ```
 
-Advanced real-world validation scenarios:
-- `REAL_WORLD_E2E_TESTS.md`
+## Environment Variables
 
-## MCP Tools
-
-- `register_agent`
-  - input:
-    - required: `description`, `project`, `role`, `specialization`
-    - optional: `name`, `github`, `branch`, `session_id`
-  - example: `{ "name": "alpha", "description": "backend owner", "project": "civitas", "role": "backend engineer", "specialization": "go+nats", "github": "CommanderCrowCode", "branch": "feat/mesh" }`
-  - output: `{ "agent_id": "ag-..." }` (may also include `session_id` if auto-bound)
-
-- `list_agents`
-  - input: `{}`
-  - output: profile-rich list of agents
-
-- `send_message`
-  - input: `{ "from": "ag-...", "to": "ag-...", "body": "hello" }`
-  - output: message envelope JSON
-
-- `broadcast_message`
-  - input: `{ "from": "ag-...", "body": "status sync", "query": "backend", "project": "civitas", "role": "backend engineer", "specialization": "go", "max": "20" }`
-  - output: array of sent message envelopes
-
-- `fetch_messages`
-  - input: `{ "agent_id": "ag-...", "max": "10" }`
-  - output: array of queued messages
-
-- `fetch_message_history`
-  - input: `{ "agent_id": "ag-...", "max": "20" }`
-  - output: durable JetStream history for that agent (oldest to newest in returned slice)
-
-- `find_agents`
-  - input: `{ "query": "nats", "project": "civitas", "role": "backend engineer", "specialization": "go", "max": "10" }`
-  - output: filtered list of agent profiles
-
-- `update_agent_profile`
-  - input: `{ "agent_id": "ag-...", "description": "updated", "project": "civitas", "role": "architect", "github": "CommanderCrowCode", "branch": "main", "specialization": "distributed-systems" }`
-  - output: updated agent profile
-
-- `bind_session`
-  - input: `{ "agent_id": "ag-...", "session_id": "..." }`
-  - output: `{ "agent_id": "...", "session_id": "..." }`
-
-- `get_session_binding`
-  - input: `{ "agent_id": "ag-..." }`
-  - output: `{ "agent_id": "...", "session_id": "..." }`
-
-## Notes
-
-- This POC keeps delivery queue in memory.
-- If server restarts, agent registrations and queued messages are lost.
-- This is intentional for a small stepping-stone project.
-- If `OPENCODE_URL` is set and recipient has a bound session, `send_message` also pushes to OpenCode session via `prompt_async`.
-- Auto-bind order on `register_agent`: explicit `session_id` input, request header detection, then latest active unbound OpenCode session (best effort).
-- If some metadata is not known at registration, provide `"unknown"` and later refine with `update_agent_profile`.
-- NATS server logs do not include message bodies by default; use `fetch_message_history` for durable per-agent history.
-
-## Ready-for-Usage Checklist
-
-- `make nats-up` starts NATS successfully.
-- `make run` starts MCP server on stdio.
-- MCP client can register at least two agents with `register_agent`.
-- One agent can `send_message` to another and recipient can `fetch_messages`.
-- `make build` and `make test` both pass.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NATS_URL` | `nats://127.0.0.1:4222` | NATS server URL |
+| `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio` or `http` |
+| `MCP_HTTP_ADDR` | `127.0.0.1:18808` | HTTP bind address |
+| `MCP_HTTP_PATH` | `/mcp` | HTTP endpoint path |
+| `OPENCODE_URL` | -- | OpenCode server URL for push delivery |
