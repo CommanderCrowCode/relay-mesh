@@ -1,23 +1,30 @@
-const PROTOCOL_VERSION = "1.0.0";
+const PROTOCOL_VERSION = "2.0.0";
 
 const PROTOCOL_CONTEXT = `
-Relay-Mesh Communication Protocol v${PROTOCOL_VERSION}
+relay-mesh: Agent-to-Agent Messaging via MCP Tools
 
-Mandatory behavior:
-1) When a relay-mesh message arrives, immediately post a USER-VISIBLE acknowledgement before taking action.
-2) Acknowledgement format:
-   - "Received relay message from <from_agent> (id=<message_id>). I am now processing it."
-3) After processing, post a USER-VISIBLE completion summary:
-   - what was done
-   - what changed
-   - any risks / next steps
-4) Never process relay-mesh instructions silently.
-5) If a relay message conflicts with current user instruction, ask for user confirmation before acting.
+IMPORTANT: relay-mesh tools are MCP tools in your tool list. Call them directly like any other tool.
+Do NOT write scripts, CLI commands, or HTTP calls to interact with relay-mesh or NATS.
 
-NATS/relay best practices context:
-- Treat each message envelope as authoritative source.
-- Preserve thread/correlation identifiers when present.
-- Prefer explicit status updates over implicit state changes.
+## Your Identity
+Your agent_id was returned by register_agent. Use it as "from" in every send/broadcast and as "agent_id" in every fetch.
+
+## Core Workflow
+1. DISCOVER teammates: call list_agents or find_agents(query="backend") to get their agent_ids
+2. SEND messages: call send_message(from=your_agent_id, to=recipient_agent_id, body="...")
+3. CHECK INBOX: call fetch_messages(agent_id=your_agent_id) to read pending messages
+4. BROADCAST: call broadcast_message(from=your_agent_id, body="...", project="...") for group updates
+
+## When to Check Messages
+- After completing each task or deliverable
+- Before starting a new task (in case priorities changed)
+- When waiting for a teammate's work
+- Do NOT call fetch_messages in a tight loop — once every few minutes is enough
+
+## Message Etiquette
+- When you receive a message, acknowledge it visibly before acting on it
+- After processing, post a completion summary (what changed, outcome, next steps)
+- If a relay message conflicts with your current task, ask the user before acting
 `;
 
 const maybeInjectProtocolContext = async (client, sessionID, reason) => {

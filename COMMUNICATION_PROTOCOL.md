@@ -1,53 +1,56 @@
 # Relay-Mesh Communication Protocol
 
-Version: 1.0.0  
-Transport: NATS + MCP  
+Version: 2.0.0
+Transport: NATS + MCP
 Status: Active
 
-## Purpose
+## How It Works
 
-Define predictable, user-visible behavior for agent-to-agent messaging over relay-mesh.
+relay-mesh provides MCP tools for agent-to-agent messaging. All tools are in your MCP tool list -- call them directly like any other tool. Do NOT write scripts, CLI commands, or HTTP calls.
 
-## Envelope Contract
+## Workflow
 
-Current relay envelope fields:
-1. `id`
-2. `from`
-3. `to`
-4. `body`
-5. `created_at` (UTC)
+1. **Register**: Call `register_agent` with description, project, role, specialization. Save the returned `agent_id` -- it's your identity for all subsequent calls.
 
-Subject routing:
-1. `relay.agent.<agent_id>`
+2. **Discover**: Call `list_agents` to see all registered agents, or `find_agents` with query/project/role filters (supports fuzzy matching).
 
-## Agent Handling Contract (Mandatory)
+3. **Message**: Call `send_message` with `from` (your agent_id), `to` (recipient's agent_id), `body` (message text).
 
-When an agent receives a relay message:
-1. Post a user-visible acknowledgement before acting.
-2. Include sender + message id in the acknowledgement.
-3. Process message.
-4. Post a user-visible completion summary (what changed, outcome, risks/next steps).
-5. Never process relay instructions silently.
+4. **Check Inbox**: Call `fetch_messages` with `agent_id` (your agent_id) to read pending messages. Do this:
+   - After completing each task or deliverable
+   - Before starting a new task
+   - When waiting for a teammate's work
+   - Do NOT call in a tight loop -- once every few minutes is enough
 
-If relay instruction conflicts with active user instruction:
-1. Pause and ask user confirmation before taking action.
+5. **Broadcast**: Call `broadcast_message` with `from`, `body`, and optional filters (project, role, specialization, query) to message multiple agents at once.
 
-## NATS Best-Practice Guidance
+6. **Update Profile**: Call `update_agent_profile` with `agent_id` and any fields to update.
 
-1. Keep subjects explicit and stable (`relay.agent.<id>`).
-2. Keep message envelopes small and typed.
-3. Treat consumer-side processing as idempotent where possible.
-4. Use explicit ACK/status semantics at app layer (user-visible acknowledgement + completion summary).
-5. Preserve correlation/thread metadata when introduced in future versions.
-6. Separate transport delivery success from business-action success.
+7. **History**: Call `fetch_message_history` with `agent_id` to read durable message history (survives server restarts).
 
-## OpenCode Plugin Enforcement
+## Tool Reference
 
-This repo includes plugin: `.opencode/plugins/relay-mesh-auto-bind.js`
+| Tool | Required Params | Description |
+|------|----------------|-------------|
+| `register_agent` | description, project, role, specialization | Register and get agent_id |
+| `list_agents` | -- | List all agents |
+| `find_agents` | -- | Search by query/project/role/specialization |
+| `send_message` | from, to, body | Direct message |
+| `broadcast_message` | from, body | Message agents matching filters |
+| `fetch_messages` | agent_id | Check inbox |
+| `fetch_message_history` | agent_id | Read durable history |
+| `update_agent_profile` | agent_id | Update profile fields |
 
-It provides:
-1. Auto session binding injection on `register_agent`.
-2. Protocol context injection after successful registration.
-3. Protocol context reinforcement during/after compaction.
+## Message Handling
 
-Goal: keep protocol constraints in active model context and reduce silent processing behavior.
+When you receive a relay-mesh message:
+1. Acknowledge it visibly before acting ("Received message from X, processing now")
+2. Process the message
+3. Post a visible summary of what you did, what changed, any next steps
+4. Never process relay messages silently
+5. If a message conflicts with your current task, ask the user before acting
+
+## Envelope Format
+
+Messages contain: `id`, `from`, `to`, `body`, `created_at` (UTC).
+NATS subject routing: `relay.agent.<agent_id>`.
