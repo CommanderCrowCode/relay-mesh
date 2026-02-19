@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__relay-mesh__register_agent",
+        "hooks": [{"type": "command", "command": ".claude/hooks/relay-pre-tool-use.sh"}]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__relay-mesh__register_agent",
+        "hooks": [{"type": "command", "command": ".claude/hooks/relay-post-tool-use.sh"}]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [{"type": "command", "command": ".claude/hooks/relay-stop.sh"}]
+      }
+    ]
+  }
+}

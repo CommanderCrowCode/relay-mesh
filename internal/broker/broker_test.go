@@ -236,7 +236,7 @@ func TestBindAndGetSessionBinding(t *testing.T) {
 		t.Fatalf("register agent: %v", err)
 	}
 
-	if err := b.BindSession(agentID, "sess-123"); err != nil {
+	if err := b.BindSession(agentID, "sess-123", "opencode"); err != nil {
 		t.Fatalf("bind session: %v", err)
 	}
 
@@ -246,6 +246,63 @@ func TestBindAndGetSessionBinding(t *testing.T) {
 	}
 	if sessionID != "sess-123" {
 		t.Fatalf("unexpected session id: got %q", sessionID)
+	}
+}
+
+func TestGetSessionBindingWithHarness(t *testing.T) {
+	b := newTestBroker(t)
+
+	agentID, err := b.RegisterAgent(testProfile("beta"))
+	if err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+
+	// Before binding, should return not-ok.
+	_, _, ok := b.GetSessionBindingWithHarness(agentID)
+	if ok {
+		t.Fatal("expected no binding before bind call")
+	}
+
+	if err := b.BindSession(agentID, "sess-456", "claude-code"); err != nil {
+		t.Fatalf("bind session: %v", err)
+	}
+
+	sessionID, harness, ok := b.GetSessionBindingWithHarness(agentID)
+	if !ok {
+		t.Fatal("expected session binding to exist")
+	}
+	if sessionID != "sess-456" {
+		t.Fatalf("unexpected session id: got %q", sessionID)
+	}
+	if harness != "claude-code" {
+		t.Fatalf("unexpected harness: got %q", harness)
+	}
+}
+
+func TestBindSessionEmptyHarnessPreservesExisting(t *testing.T) {
+	b := newTestBroker(t)
+
+	agentID, err := b.RegisterAgent(testProfile("gamma"))
+	if err != nil {
+		t.Fatalf("register agent: %v", err)
+	}
+
+	// First bind with a harness.
+	if err := b.BindSession(agentID, "sess-789", "codex"); err != nil {
+		t.Fatalf("first bind: %v", err)
+	}
+
+	// Rebind with empty harness — should keep the existing harness.
+	if err := b.BindSession(agentID, "sess-789", ""); err != nil {
+		t.Fatalf("rebind: %v", err)
+	}
+
+	_, harness, ok := b.GetSessionBindingWithHarness(agentID)
+	if !ok {
+		t.Fatal("expected binding to exist")
+	}
+	if harness != "codex" {
+		t.Fatalf("expected harness to remain codex, got %q", harness)
 	}
 }
 
@@ -515,7 +572,7 @@ func TestFetchHistory(t *testing.T) {
 func TestBindSessionRejectsUnknownAgent(t *testing.T) {
 	b := newTestBroker(t)
 
-	err := b.BindSession("ag-missing", "sess-123")
+	err := b.BindSession("ag-missing", "sess-123", "generic")
 	if err == nil {
 		t.Fatal("expected bind session to fail for unknown agent")
 	}

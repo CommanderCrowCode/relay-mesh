@@ -49,6 +49,7 @@ type agentState struct {
 	Profile   AgentProfile
 	Subject   string
 	SessionID string
+	Harness   string // "opencode", "claude-code", "codex", "generic"
 	Queue     []Message
 }
 
@@ -265,9 +266,10 @@ func (b *Broker) FindAgents(filter AgentSearchFilter) []map[string]string {
 	return out
 }
 
-func (b *Broker) BindSession(agentID, sessionID string) error {
+func (b *Broker) BindSession(agentID, sessionID, harness string) error {
 	agentID = strings.TrimSpace(agentID)
 	sessionID = strings.TrimSpace(sessionID)
+	harness = strings.TrimSpace(harness)
 	if agentID == "" || sessionID == "" {
 		return fmt.Errorf("agent_id and session_id are required")
 	}
@@ -280,6 +282,9 @@ func (b *Broker) BindSession(agentID, sessionID string) error {
 		return fmt.Errorf("agent not found: %s", agentID)
 	}
 	agent.SessionID = sessionID
+	if harness != "" {
+		agent.Harness = harness
+	}
 	return nil
 }
 
@@ -292,6 +297,17 @@ func (b *Broker) GetSessionBinding(agentID string) (string, bool) {
 		return "", false
 	}
 	return agent.SessionID, true
+}
+
+func (b *Broker) GetSessionBindingWithHarness(agentID string) (sessionID string, harness string, ok bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	agent := b.agents[agentID]
+	if agent == nil || strings.TrimSpace(agent.SessionID) == "" {
+		return "", "", false
+	}
+	return agent.SessionID, agent.Harness, true
 }
 
 func (b *Broker) ListBoundSessionIDs() map[string]struct{} {
