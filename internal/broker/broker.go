@@ -23,7 +23,28 @@ type Message struct {
 	From      string    `json:"from"`
 	To        string    `json:"to"`
 	Body      string    `json:"body"`
+	Priority  string    `json:"priority,omitempty"` // "normal" | "urgent" | "blocking"
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// DeliveryRecord tracks send and read timestamps for a message.
+type DeliveryRecord struct {
+	MessageID     string     `json:"message_id"`
+	To            string     `json:"to"`
+	SentAt        time.Time  `json:"sent_at"`
+	ReadAt        *time.Time `json:"read_at,omitempty"`
+	PushDelivered bool       `json:"push_delivered"`
+}
+
+// Artifact is a structured deliverable published by an agent for teammates.
+type Artifact struct {
+	ID           string    `json:"id"`
+	From         string    `json:"from"`
+	Project      string    `json:"project"`
+	ArtifactType string    `json:"artifact_type"` // "file_tree" | "api_endpoint" | "schema" | "config" | "dockerfile"
+	Name         string    `json:"name"`
+	Content      string    `json:"content"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type AgentProfile struct {
@@ -55,6 +76,7 @@ type AgentSearchFilter struct {
 	Role           string
 	Specialization string
 	Limit          int
+	ActiveWithin   time.Duration // if > 0, only return agents seen within this window
 }
 
 type agentState struct {
@@ -70,13 +92,15 @@ type agentState struct {
 
 // Broker stores anonymous agent routing state and uses NATS as transport.
 type Broker struct {
-	mu           sync.Mutex
-	nc           *nats.Conn
-	js           nats.JetStreamContext
-	agents       map[string]*agentState
-	subs         map[string]*nats.Subscription
-	sessionIndex map[string]string            // session_id → agent_id
-	contextStore map[string]map[string]string // project → key → value
+	mu            sync.Mutex
+	nc            *nats.Conn
+	js            nats.JetStreamContext
+	agents        map[string]*agentState
+	subs          map[string]*nats.Subscription
+	sessionIndex  map[string]string            // session_id → agent_id
+	contextStore  map[string]map[string]string // project → key → value
+	deliveryLog   map[string]*DeliveryRecord   // message_id → delivery record
+	artifactStore map[string][]Artifact        // project → artifacts
 }
 
 func New(natsURL string) (*Broker, error) {
@@ -94,12 +118,14 @@ func New(natsURL string) (*Broker, error) {
 		return nil, err
 	}
 	return &Broker{
-		nc:           nc,
-		js:           js,
-		agents:       make(map[string]*agentState),
-		subs:         make(map[string]*nats.Subscription),
-		sessionIndex: make(map[string]string),
-		contextStore: make(map[string]map[string]string),
+		nc:            nc,
+		js:            js,
+		agents:        make(map[string]*agentState),
+		subs:          make(map[string]*nats.Subscription),
+		sessionIndex:  make(map[string]string),
+		contextStore:  make(map[string]map[string]string),
+		deliveryLog:   make(map[string]*DeliveryRecord),
+		artifactStore: make(map[string][]Artifact),
 	}, nil
 }
 
@@ -295,6 +321,9 @@ func (b *Broker) FindAgents(filter AgentSearchFilter) []map[string]string {
 	totalTokens := len(tokenize(filter.Query))
 
 	for _, a := range b.agents {
+		if filter.ActiveWithin > 0 && time.Since(a.LastSeen) > filter.ActiveWithin {
+			continue
+		}
 		score, matchedTokens, ok := matchAgent(a.Profile, filter)
 		if !ok {
 			continue
@@ -409,7 +438,7 @@ func (b *Broker) ListBoundSessionIDs() map[string]struct{} {
 	return out
 }
 
-func (b *Broker) Send(from, to, body string) (Message, error) {
+func (b *Broker) Send(from, to, body, priority string) (Message, error) {
 	b.mu.Lock()
 	fromAgent := b.agents[from]
 	toAgent := b.agents[to]
@@ -434,6 +463,7 @@ func (b *Broker) Send(from, to, body string) (Message, error) {
 		From:      from,
 		To:        to,
 		Body:      body,
+		Priority:  priority,
 		CreatedAt: time.Now().UTC(),
 	}
 	data, err := json.Marshal(m)
@@ -441,7 +471,19 @@ func (b *Broker) Send(from, to, body string) (Message, error) {
 		return Message{}, fmt.Errorf("marshal message: %w", err)
 	}
 
+	// Record delivery before NATS publish (callback fires async).
+	b.mu.Lock()
+	b.deliveryLog[id] = &DeliveryRecord{
+		MessageID: id,
+		To:        to,
+		SentAt:    time.Now().UTC(),
+	}
+	b.mu.Unlock()
+
 	if _, err := b.js.Publish(toAgent.Subject, data); err != nil {
+		b.mu.Lock()
+		delete(b.deliveryLog, id)
+		b.mu.Unlock()
 		return Message{}, fmt.Errorf("jetstream publish: %w", err)
 	}
 
@@ -497,7 +539,7 @@ func (b *Broker) FetchHistory(agentID string, max int) ([]Message, error) {
 	return out, nil
 }
 
-func (b *Broker) Broadcast(from, body string, filter AgentSearchFilter) ([]Message, error) {
+func (b *Broker) Broadcast(from, body, priority string, filter AgentSearchFilter) ([]Message, error) {
 	filter = normalizeFilter(filter)
 	if strings.TrimSpace(from) == "" {
 		return nil, fmt.Errorf("sender agent_id is required")
@@ -522,6 +564,9 @@ func (b *Broker) Broadcast(from, body string, filter AgentSearchFilter) ([]Messa
 		if id == from {
 			continue
 		}
+		if filter.ActiveWithin > 0 && time.Since(a.LastSeen) > filter.ActiveWithin {
+			continue
+		}
 		score, matchedTokens, ok := matchAgent(a.Profile, filter)
 		if !ok {
 			continue
@@ -542,7 +587,7 @@ func (b *Broker) Broadcast(from, body string, filter AgentSearchFilter) ([]Messa
 
 	out := make([]Message, 0, min(filter.Limit, len(targets)))
 	for _, to := range targets {
-		msg, err := b.Send(from, to.id, body)
+		msg, err := b.Send(from, to.id, body, priority)
 		if err != nil {
 			return out, err
 		}
@@ -579,8 +624,17 @@ func (b *Broker) Fetch(agentID string, max int) ([]Message, error) {
 	out := make([]Message, max)
 	copy(out, agent.Queue[:max])
 	agent.Queue = agent.Queue[max:]
+
+	// Mark fetched messages as read in delivery log.
+	for i := range out {
+		if rec, ok := b.deliveryLog[out[i].ID]; ok {
+			t := now
+			rec.ReadAt = &t
+		}
+	}
 	return out, nil
 }
+
 
 // UnreadCount returns the number of pending messages in an agent's queue.
 func (b *Broker) UnreadCount(agentID string) int {
@@ -689,6 +743,118 @@ func (b *Broker) WaitForAgents(project string, minCount int, timeoutSec int) ([]
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+// Heartbeat updates an agent's LastSeen timestamp to signal it is still alive.
+func (b *Broker) Heartbeat(agentID string) error {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return fmt.Errorf("agent_id is required")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.agents[agentID]
+	if a == nil {
+		return fmt.Errorf("agent not found: %s", agentID)
+	}
+	a.LastSeen = time.Now().UTC()
+	return nil
+}
+
+// PruneStaleAgents removes agents that haven't been seen within maxAge.
+// Returns the number of agents pruned.
+func (b *Broker) PruneStaleAgents(maxAge time.Duration) int {
+	if maxAge <= 0 {
+		maxAge = 30 * time.Minute
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	cutoff := time.Now().Add(-maxAge)
+	pruned := 0
+	for id, a := range b.agents {
+		if a.LastSeen.Before(cutoff) {
+			if sub, ok := b.subs[id]; ok {
+				_ = sub.Unsubscribe()
+				delete(b.subs, id)
+			}
+			if a.SessionID != "" {
+				delete(b.sessionIndex, a.SessionID)
+			}
+			delete(b.agents, id)
+			pruned++
+		}
+	}
+	return pruned
+}
+
+// GetMessageStatus returns the delivery record for a message, if tracked.
+func (b *Broker) GetMessageStatus(messageID string) (*DeliveryRecord, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	rec, ok := b.deliveryLog[messageID]
+	if !ok {
+		return nil, false
+	}
+	cp := *rec
+	return &cp, true
+}
+
+// PublishArtifact stores a structured artifact for the project.
+func (b *Broker) PublishArtifact(from, project, artifactType, name, content string) (Artifact, error) {
+	project = normalizeProjectName(project)
+	from = strings.TrimSpace(from)
+	artifactType = strings.TrimSpace(artifactType)
+	name = strings.TrimSpace(name)
+	if from == "" {
+		return Artifact{}, fmt.Errorf("from is required")
+	}
+	if project == "" {
+		return Artifact{}, fmt.Errorf("project is required")
+	}
+	if artifactType == "" {
+		return Artifact{}, fmt.Errorf("artifact_type is required")
+	}
+	if name == "" {
+		return Artifact{}, fmt.Errorf("name is required")
+	}
+	id, err := randomID("art")
+	if err != nil {
+		return Artifact{}, err
+	}
+	a := Artifact{
+		ID:           id,
+		From:         from,
+		Project:      project,
+		ArtifactType: artifactType,
+		Name:         name,
+		Content:      content,
+		CreatedAt:    time.Now().UTC(),
+	}
+	b.mu.Lock()
+	b.artifactStore[project] = append(b.artifactStore[project], a)
+	b.mu.Unlock()
+	return a, nil
+}
+
+// ListArtifacts returns artifacts for a project, optionally filtered by type.
+func (b *Broker) ListArtifacts(project, artifactType string) []Artifact {
+	project = normalizeProjectName(project)
+	artifactType = strings.TrimSpace(artifactType)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	all := b.artifactStore[project]
+	if artifactType == "" {
+		out := make([]Artifact, len(all))
+		copy(out, all)
+		return out
+	}
+	out := make([]Artifact, 0)
+	for _, a := range all {
+		if a.ArtifactType == artifactType {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func randomID(prefix string) (string, error) {

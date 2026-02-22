@@ -126,7 +126,7 @@ func TestRegisterSendAndFetch(t *testing.T) {
 		t.Fatalf("list_agents missing expected entries: %#v", agents)
 	}
 
-	msg, err := b.Send(fromID, toID, "hello")
+	msg, err := b.Send(fromID, toID, "hello", "")
 	if err != nil {
 		t.Fatalf("send message: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestSendRejectsUnknownSender(t *testing.T) {
 		t.Fatalf("register receiver: %v", err)
 	}
 
-	_, err = b.Send("ag-missing", toID, "hello")
+	_, err = b.Send("ag-missing", toID, "hello", "")
 	if err == nil {
 		t.Fatal("expected send to fail for unknown sender")
 	}
@@ -183,7 +183,7 @@ func TestSendRejectsUnknownTarget(t *testing.T) {
 		t.Fatalf("register sender: %v", err)
 	}
 
-	_, err = b.Send(fromID, "ag-missing", "hello")
+	_, err = b.Send(fromID, "ag-missing", "hello", "")
 	if err == nil {
 		t.Fatal("expected send to fail for unknown target")
 	}
@@ -205,7 +205,7 @@ func TestFetchDefaultLimitAndDrain(t *testing.T) {
 	}
 
 	for i := 0; i < 12; i++ {
-		if _, err := b.Send(fromID, toID, "payload"); err != nil {
+		if _, err := b.Send(fromID, toID, "payload", ""); err != nil {
 			t.Fatalf("send message %d: %v", i, err)
 		}
 	}
@@ -507,7 +507,7 @@ func TestBroadcast(t *testing.T) {
 		t.Fatalf("register frontend: %v", err)
 	}
 
-	msgs, err := b.Broadcast(sender, "sync", AgentSearchFilter{
+	msgs, err := b.Broadcast(sender, "sync", "", AgentSearchFilter{
 		Project: "civitas",
 		Role:    "backend",
 		Limit:   10,
@@ -547,13 +547,13 @@ func TestFetchHistory(t *testing.T) {
 		t.Fatalf("register receiver: %v", err)
 	}
 
-	if _, err := b.Send(fromID, toID, "m1"); err != nil {
+	if _, err := b.Send(fromID, toID, "m1", ""); err != nil {
 		t.Fatalf("send m1: %v", err)
 	}
-	if _, err := b.Send(fromID, toID, "m2"); err != nil {
+	if _, err := b.Send(fromID, toID, "m2", ""); err != nil {
 		t.Fatalf("send m2: %v", err)
 	}
-	if _, err := b.Send(fromID, toID, "m3"); err != nil {
+	if _, err := b.Send(fromID, toID, "m3", ""); err != nil {
 		t.Fatalf("send m3: %v", err)
 	}
 
@@ -796,9 +796,9 @@ func TestUnreadCount(t *testing.T) {
 	id1, _ := b.RegisterAgent(AgentProfile{Description: "a", Project: "p", Role: "r", Specialization: "s"})
 	id2, _ := b.RegisterAgent(AgentProfile{Description: "b", Project: "p", Role: "r", Specialization: "s"})
 
-	b.Send(id1, id2, "msg1")
-	b.Send(id1, id2, "msg2")
-	b.Send(id1, id2, "msg3")
+	b.Send(id1, id2, "msg1", "")
+	b.Send(id1, id2, "msg2", "")
+	b.Send(id1, id2, "msg3", "")
 	waitForQueuedMessages(t, b, id2, 3)
 
 	if n := b.UnreadCount(id2); n != 3 {
@@ -835,5 +835,144 @@ func TestWaitForAgents_Success(t *testing.T) {
 	}
 	if len(agents) != 2 {
 		t.Fatalf("expected 2 agents, got %d", len(agents))
+	}
+}
+
+func TestHeartbeatAndPrune(t *testing.T) {
+	b := newTestBroker(t)
+	id, err := b.RegisterAgent(AgentProfile{Description: "a", Project: "p", Role: "r", Specialization: "s"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Heartbeat should succeed.
+	if err := b.Heartbeat(id); err != nil {
+		t.Fatalf("heartbeat: %v", err)
+	}
+
+	// Pruning with a very long max_age should keep the agent.
+	if n := b.PruneStaleAgents(24 * time.Hour); n != 0 {
+		t.Fatalf("expected 0 pruned, got %d", n)
+	}
+	if agents := b.ListAgents(); len(agents) != 1 {
+		t.Fatalf("expected 1 agent after prune, got %d", len(agents))
+	}
+
+	// Pruning with zero max_age prunes nothing (0 → default 30m).
+	if n := b.PruneStaleAgents(0); n != 0 {
+		t.Fatalf("expected 0 pruned (default), got %d", n)
+	}
+
+	// Unknown agent heartbeat should error.
+	if err := b.Heartbeat("ag-nonexistent"); err == nil {
+		t.Fatal("expected error for unknown agent")
+	}
+}
+
+func TestDeliveryReceipt(t *testing.T) {
+	b := newTestBroker(t)
+	fromID, _ := b.RegisterAgent(AgentProfile{Description: "sender", Project: "p", Role: "r", Specialization: "s"})
+	toID, _ := b.RegisterAgent(AgentProfile{Description: "receiver", Project: "p", Role: "r", Specialization: "s"})
+
+	msg, err := b.Send(fromID, toID, "hello receipt", "")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	// Status should be visible with ReadAt unset.
+	rec, ok := b.GetMessageStatus(msg.ID)
+	if !ok {
+		t.Fatal("expected delivery record")
+	}
+	if rec.ReadAt != nil {
+		t.Fatal("expected ReadAt to be nil before fetch")
+	}
+	if rec.To != toID {
+		t.Fatalf("expected To=%s, got %s", toID, rec.To)
+	}
+
+	// After fetch, ReadAt should be set.
+	waitForQueuedMessages(t, b, toID, 1)
+	b.Fetch(toID, 10)
+
+	rec2, ok := b.GetMessageStatus(msg.ID)
+	if !ok {
+		t.Fatal("expected delivery record after fetch")
+	}
+	if rec2.ReadAt == nil {
+		t.Fatal("expected ReadAt to be set after fetch")
+	}
+}
+
+func TestPriorityPassthrough(t *testing.T) {
+	b := newTestBroker(t)
+	fromID, _ := b.RegisterAgent(AgentProfile{Description: "sender", Project: "p", Role: "r", Specialization: "s"})
+	toID, _ := b.RegisterAgent(AgentProfile{Description: "receiver", Project: "p", Role: "r", Specialization: "s"})
+
+	_, err := b.Send(fromID, toID, "urgent message", "urgent")
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	waitForQueuedMessages(t, b, toID, 1)
+	msgs, _ := b.Fetch(toID, 10)
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if msgs[0].Priority != "urgent" {
+		t.Fatalf("expected priority 'urgent', got %q", msgs[0].Priority)
+	}
+}
+
+func TestPublishAndListArtifacts(t *testing.T) {
+	b := newTestBroker(t)
+	id, _ := b.RegisterAgent(AgentProfile{Description: "a", Project: "myproject", Role: "r", Specialization: "s"})
+
+	art, err := b.PublishArtifact(id, "myproject", "schema", "db_schema", `{"tables":["users"]}`)
+	if err != nil {
+		t.Fatalf("publish artifact: %v", err)
+	}
+	if art.ID == "" {
+		t.Fatal("expected non-empty artifact ID")
+	}
+
+	// List all artifacts.
+	all := b.ListArtifacts("myproject", "")
+	if len(all) != 1 {
+		t.Fatalf("expected 1 artifact, got %d", len(all))
+	}
+
+	// Filter by type.
+	schemas := b.ListArtifacts("myproject", "schema")
+	if len(schemas) != 1 {
+		t.Fatalf("expected 1 schema artifact, got %d", len(schemas))
+	}
+	dockerfiles := b.ListArtifacts("myproject", "dockerfile")
+	if len(dockerfiles) != 0 {
+		t.Fatalf("expected 0 dockerfile artifacts, got %d", len(dockerfiles))
+	}
+
+	// Missing project returns empty.
+	empty := b.ListArtifacts("noproject", "")
+	if len(empty) != 0 {
+		t.Fatalf("expected 0 artifacts for missing project, got %d", len(empty))
+	}
+}
+
+func TestActiveWithinFilter(t *testing.T) {
+	b := newTestBroker(t)
+	b.RegisterAgent(AgentProfile{Description: "a", Project: "p", Role: "r", Specialization: "s"})
+
+	// With a large active_within window, should find the agent.
+	results := b.FindAgents(AgentSearchFilter{Project: "p", Limit: 10, ActiveWithin: time.Hour})
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result with active_within=1h, got %d", len(results))
+	}
+
+	// With a tiny window (1ns), should find nothing.
+	time.Sleep(time.Millisecond)
+	results = b.FindAgents(AgentSearchFilter{Project: "p", Limit: 10, ActiveWithin: time.Nanosecond})
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results with expired active_within, got %d", len(results))
 	}
 }

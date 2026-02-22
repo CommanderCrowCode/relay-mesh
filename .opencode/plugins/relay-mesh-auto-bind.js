@@ -32,24 +32,33 @@ Before writing any files, exchange structural context with teammates:
    - shared_context(action="set", project=..., key="<role>_api_prefix", value="/api/v1/...") if applicable
 3. When importing from a teammate's code: read their published path, do NOT guess
 
+## BIDIRECTIONAL COORDINATION (CRITICAL)
+relay-mesh is NOT a one-way broadcast. Every message requires a response:
+- ACKNOWLEDGE before acting: "Received. Starting <task>."
+- REPLY with results: send_message back when you finish — include file paths, artifact IDs
+- SIGNAL blockers: send_message(priority="urgent") the moment you are stuck
+- SILENCE = you look stuck. Keep the loop alive.
+
 ## Core Workflow (after registration)
-1. DISCOVER teammates: call list_agents or find_agents(query="backend") to get their agent_ids
-2. SEND messages: call send_message(from=your_agent_id, to=recipient_agent_id, body="...")
+1. DISCOVER teammates: call list_agents(active_within="5m") or find_agents to get their agent_ids
+2. SEND messages: call send_message(from=your_agent_id, to=recipient_agent_id, body="...", priority="normal")
 3. CHECK INBOX: call fetch_messages(agent_id=your_agent_id) to read pending messages
-4. BROADCAST: call broadcast_message(from=your_agent_id, body="...", project="...") for group updates
+4. BROADCAST: call broadcast_message(from=your_agent_id, body="...", project="...", priority="normal")
+5. SHARE ARTIFACTS: call publish_artifact(from, project, artifact_type, name, content) for schemas/file trees
+6. HEARTBEAT: call heartbeat_agent(agent_id) every 5 min during long tasks
 
 ## When to Check Messages (MANDATORY)
 - Call fetch_messages every 3 minutes OR after every 5 tool calls — whichever comes first
 - Even when push delivery is active — push is best-effort, fetch is guaranteed
 - After completing each file or task deliverable
 - Before starting a new task (priorities may have changed)
-- When waiting for a teammate's output
+- Immediately when you become unblocked
 
 ## Completing Your Work
 When your implementation is done:
 1. Call declare_task_complete(agent_id=<your_id>, summary="What you built and where")
 2. Call update_agent_profile(agent_id=<your_id>, status="done")
-3. Send a final summary message to team-lead
+3. Send a final summary message to team-lead (include artifact IDs, file paths)
 
 Team-lead only — before declaring project complete:
 1. Call check_project_readiness(project="<your-project>")
@@ -57,7 +66,9 @@ Team-lead only — before declaring project complete:
 3. ONLY broadcast project completion when check_project_readiness returns ready: true
 
 ## Message Etiquette
-- When you receive a message, acknowledge it visibly before acting on it
+- ACKNOWLEDGE every received message before acting
+- REPLY with results after finishing — never leave a message unanswered
+- For urgent/blocking priority: respond immediately, drop current work if needed
 - After processing, post a completion summary (what changed, outcome, next steps)
 - If a relay message conflicts with your current task, ask the user before acting
 

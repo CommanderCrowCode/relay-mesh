@@ -672,17 +672,27 @@ Do these steps BEFORE starting any other work:
 6. Call fetch_messages to check if anyone has already sent you instructions
 Only after completing all 6 steps should you begin your primary task.
 
+## Bidirectional Coordination (CRITICAL)
+relay-mesh is NOT a one-way broadcast system. Every message you receive requires a response:
+- When you receive a message, ALWAYS acknowledge it: "Received. Starting <task>."
+- When you finish a subtask, ALWAYS report back: send_message to the sender with results.
+- When you are blocked, immediately send_message(priority="urgent") to explain the blocker.
+- When you complete work, send your results + file paths to team-lead before declaring done.
+Silence = your teammates assume you are stuck. Keep the loop alive.
+
 ## Shared Context: Before You Code
 Before writing any files, exchange structural context:
 1. Call shared_context(action="list", project="<your-project>") to read existing conventions
 2. Publish YOUR paths before coding: shared_context(action="set", project=..., key="<role>_path", value="<your directory>")
-3. When importing from a teammate's code: read their published path first, do NOT guess
+3. Publish API contracts as artifacts: publish_artifact(from=..., project=..., artifact_type="api_endpoint", ...)
+4. When importing from a teammate's code: read their published path first, do NOT guess
 
 ## When to Check Messages (MANDATORY)
 - Call fetch_messages every 3 minutes OR after every 5 tool calls -- whichever comes first
 - Even when push delivery is active -- push is best-effort, fetch is guaranteed
 - After completing each file or task deliverable
 - Before starting a new task (priorities may have changed)
+- Immediately when you get unblocked from a blocked state
 
 ## Completing Your Work
 1. Call declare_task_complete(agent_id=<your_id>, summary="What you built and where")
@@ -692,24 +702,30 @@ Team-lead ONLY: call check_project_readiness(project=...) before broadcasting pr
 
 ## Tools Reference
 - register_agent(description, project, role, specialization, name?, session_id?) -- register yourself
-- list_agents() -- see all agents
-- find_agents(query?, project?, role?, specialization?) -- fuzzy search
-- send_message(from, to, body) -- direct message; response includes recipient_unread count
-- broadcast_message(from, body, project?, query?) -- group message; warns if 0 recipients
+- list_agents(active_within?) -- see all agents; active_within="5m" filters recent only
+- find_agents(query?, project?, role?, specialization?, active_within?) -- fuzzy search
+- send_message(from, to, body, priority?) -- direct message; priority: normal|urgent|blocking
+- broadcast_message(from, body, project?, query?, priority?) -- group message; warns if 0 recipients
 - fetch_messages(agent_id, max?) -- drain inbox; response includes remaining count
 - update_agent_profile(agent_id, status?) -- update profile; status: idle|working|blocked|done
 - get_team_status(project?) -- all agents' status, last_seen, unread_messages
 - shared_context(action, project, key?, value?) -- publish/read paths, schemas, API contracts
 - wait_for_agents(project, min_count?, timeout_seconds?) -- wait for N teammates to register
+- heartbeat_agent(agent_id) -- signal still alive; call every 5 min to avoid pruning
 - declare_task_complete(agent_id, summary?) -- mark your work done
 - check_project_readiness(project) -- check if all agents are done (team-lead uses before closing)
+- get_message_status(message_id) -- check if a sent message has been read
+- publish_artifact(from, project, artifact_type, name, content) -- share file tree, schema, config, etc.
+- list_artifacts(project, artifact_type?) -- browse published artifacts from teammates
+- prune_stale_agents(max_age?) -- remove agents not seen recently (team-lead uses)
 - bind_session(agent_id, session_id?) -- bind for push delivery
 - fetch_message_history(agent_id) -- durable message history
 
 ## Message Etiquette
-1. Acknowledge received messages before acting
-2. Post completion summaries after finishing work
-3. Never process relay messages silently
+1. Acknowledge received messages before acting -- silence looks like being stuck
+2. Use priority="urgent" when blocked or when the team needs to stop and regroup
+3. Post completion summaries after finishing work -- include file paths and artifact IDs
+4. Never process relay messages silently -- always reply
 `
 
 func installClaudeCode() error {
@@ -1236,6 +1252,8 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 		"relay-mesh",
 		"0.1.0",
 		server.WithToolCapabilities(true),
+		server.WithResourceCapabilities(false, false),
+		server.WithPromptCapabilities(false),
 	)
 
 	registerTool := mcp.NewTool(
@@ -1254,6 +1272,7 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 	listTool := mcp.NewTool(
 		"list_agents",
 		mcp.WithDescription("List all registered agents and their profiles."),
+		mcp.WithString("active_within", mcp.Description("Only return agents seen within this duration (e.g. 5m, 1h). Empty means all.")),
 	)
 	updateProfileTool := mcp.NewTool(
 		"update_agent_profile",
@@ -1276,6 +1295,7 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 		mcp.WithString("role", mcp.Description("Exact role filter.")),
 		mcp.WithString("specialization", mcp.Description("Exact specialization filter.")),
 		mcp.WithString("max", mcp.Description("Max number of agents to return (default 20).")),
+		mcp.WithString("active_within", mcp.Description("Only return agents seen within this duration (e.g. 5m, 1h). Empty means all.")),
 	)
 	sendTool := mcp.NewTool(
 		"send_message",
@@ -1283,6 +1303,7 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 		mcp.WithString("from", mcp.Required(), mcp.Description("Sender agent_id.")),
 		mcp.WithString("to", mcp.Required(), mcp.Description("Recipient agent_id.")),
 		mcp.WithString("body", mcp.Required(), mcp.Description("Message body.")),
+		mcp.WithString("priority", mcp.Description("Message priority: normal (default), urgent, or blocking.")),
 	)
 	broadcastTool := mcp.NewTool(
 		"broadcast_message",
@@ -1294,6 +1315,7 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 		mcp.WithString("role", mcp.Description("Exact role filter.")),
 		mcp.WithString("specialization", mcp.Description("Exact specialization filter.")),
 		mcp.WithString("max", mcp.Description("Max recipients (default 20).")),
+		mcp.WithString("priority", mcp.Description("Message priority: normal (default), urgent, or blocking.")),
 	)
 	fetchTool := mcp.NewTool(
 		"fetch_messages",
@@ -1350,6 +1372,36 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 		mcp.WithDescription("Check whether all agents on a project have declared completion. Team-lead MUST call this before broadcasting project complete."),
 		mcp.WithString("project", mcp.Required(), mcp.Description("Project name to check.")),
 	)
+	heartbeatTool := mcp.NewTool(
+		"heartbeat_agent",
+		mcp.WithDescription("Ping the broker to signal this agent is still active. Call periodically (every 5 min) to prevent stale-agent pruning."),
+		mcp.WithString("agent_id", mcp.Required(), mcp.Description("Your agent_id.")),
+	)
+	getMessageStatusTool := mcp.NewTool(
+		"get_message_status",
+		mcp.WithDescription("Check delivery and read status for a message you sent."),
+		mcp.WithString("message_id", mcp.Required(), mcp.Description("Message id returned by send_message.")),
+	)
+	pruneAgentsTool := mcp.NewTool(
+		"prune_stale_agents",
+		mcp.WithDescription("Remove agents that have not sent a heartbeat within the given window. Returns count of pruned agents."),
+		mcp.WithString("max_age", mcp.Description("Max idle duration before pruning (e.g. 30m, 1h). Default 30m.")),
+	)
+	publishArtifactTool := mcp.NewTool(
+		"publish_artifact",
+		mcp.WithDescription("Publish a structured artifact (file tree, API schema, Dockerfile, etc.) for teammates to consume."),
+		mcp.WithString("from", mcp.Required(), mcp.Description("Publisher agent_id.")),
+		mcp.WithString("project", mcp.Required(), mcp.Description("Project name.")),
+		mcp.WithString("artifact_type", mcp.Required(), mcp.Description("Type: file_tree, api_endpoint, schema, config, dockerfile, or other.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Artifact name (e.g. 'backend_routes', 'db_schema').")),
+		mcp.WithString("content", mcp.Required(), mcp.Description("Artifact content (JSON, YAML, markdown, plain text).")),
+	)
+	listArtifactsTool := mcp.NewTool(
+		"list_artifacts",
+		mcp.WithDescription("List artifacts published for a project, optionally filtered by type."),
+		mcp.WithString("project", mcp.Required(), mcp.Description("Project name.")),
+		mcp.WithString("artifact_type", mcp.Description("Filter by type (e.g. schema, dockerfile). Empty returns all.")),
+	)
 
 	s.AddTool(registerTool, registerHandler(b, resolver))
 	s.AddTool(listTool, listHandler(b))
@@ -1366,6 +1418,11 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 	s.AddTool(waitForAgentsTool, waitForAgentsHandler(b))
 	s.AddTool(declareCompleteTool, declareCompleteHandler(b))
 	s.AddTool(checkReadinessTool, checkReadinessHandler(b))
+	s.AddTool(heartbeatTool, heartbeatHandler(b))
+	s.AddTool(getMessageStatusTool, getMessageStatusHandler(b))
+	s.AddTool(pruneAgentsTool, pruneAgentsHandler(b))
+	s.AddTool(publishArtifactTool, publishArtifactHandler(b))
+	s.AddTool(listArtifactsTool, listArtifactsHandler(b))
 	return s
 }
 
@@ -1476,6 +1533,11 @@ func findAgentsHandler(b *broker.Broker) server.ToolHandlerFunc {
 			Specialization: req.GetString("specialization", ""),
 			Limit:          max,
 		}
+		if raw := strings.TrimSpace(req.GetString("active_within", "")); raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+				filter.ActiveWithin = d
+			}
+		}
 		body, _ := json.Marshal(b.FindAgents(filter))
 		return mcp.NewToolResultText(string(body)), nil
 	}
@@ -1483,6 +1545,13 @@ func findAgentsHandler(b *broker.Broker) server.ToolHandlerFunc {
 
 func listHandler(b *broker.Broker) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if raw := strings.TrimSpace(req.GetString("active_within", "")); raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+				filter := broker.AgentSearchFilter{Limit: 1000, ActiveWithin: d}
+				body, _ := json.Marshal(b.FindAgents(filter))
+				return mcp.NewToolResultText(string(body)), nil
+			}
+		}
 		body, _ := json.Marshal(b.ListAgents())
 		return mcp.NewToolResultText(string(body)), nil
 	}
@@ -1497,7 +1566,8 @@ func sendHandler(b *broker.Broker, registry *push.Registry) server.ToolHandlerFu
 			return mcp.NewToolResultError("from, to, and body are required"), nil
 		}
 
-		msg, err := b.Send(from, to, msgBody)
+		priority := strings.TrimSpace(req.GetString("priority", ""))
+		msg, err := b.Send(from, to, msgBody, priority)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -1602,7 +1672,8 @@ func broadcastHandler(b *broker.Broker, registry *push.Registry) server.ToolHand
 			Limit:          max,
 		}
 
-		messages, err := b.Broadcast(from, bodyText, filter)
+		priority := strings.TrimSpace(req.GetString("priority", ""))
+		messages, err := b.Broadcast(from, bodyText, priority, filter)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -1812,6 +1883,83 @@ func checkReadinessHandler(b *broker.Broker) server.ToolHandlerFunc {
 			"pending_agents": pending,
 		}
 		body, _ := json.Marshal(out)
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+func heartbeatHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		agentID := req.GetString("agent_id", "")
+		if agentID == "" {
+			return mcp.NewToolResultError("agent_id is required"), nil
+		}
+		if err := b.Heartbeat(agentID); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		out := map[string]any{"ok": true, "agent_id": agentID, "timestamp": time.Now().UTC()}
+		body, _ := json.Marshal(out)
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+func getMessageStatusHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		msgID := strings.TrimSpace(req.GetString("message_id", ""))
+		if msgID == "" {
+			return mcp.NewToolResultError("message_id is required"), nil
+		}
+		rec, ok := b.GetMessageStatus(msgID)
+		if !ok {
+			return mcp.NewToolResultError(fmt.Sprintf("message not found: %s", msgID)), nil
+		}
+		body, _ := json.Marshal(rec)
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+func pruneAgentsHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		maxAge := 30 * time.Minute
+		if raw := strings.TrimSpace(req.GetString("max_age", "")); raw != "" {
+			if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+				maxAge = d
+			}
+		}
+		count := b.PruneStaleAgents(maxAge)
+		slog.Info("pruned stale agents", "count", count, "max_age", maxAge)
+		out := map[string]any{"pruned": count, "max_age": maxAge.String()}
+		body, _ := json.Marshal(out)
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+func publishArtifactHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		from := strings.TrimSpace(req.GetString("from", ""))
+		project := strings.TrimSpace(req.GetString("project", ""))
+		artifactType := strings.TrimSpace(req.GetString("artifact_type", ""))
+		name := strings.TrimSpace(req.GetString("name", ""))
+		content := req.GetString("content", "")
+
+		artifact, err := b.PublishArtifact(from, project, artifactType, name, content)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		slog.Info("artifact published", "id", artifact.ID, "from", from, "project", project, "type", artifactType, "name", name)
+		body, _ := json.Marshal(artifact)
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+func listArtifactsHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project := strings.TrimSpace(req.GetString("project", ""))
+		artifactType := strings.TrimSpace(req.GetString("artifact_type", ""))
+		if project == "" {
+			return mcp.NewToolResultError("project is required"), nil
+		}
+		artifacts := b.ListArtifacts(project, artifactType)
+		body, _ := json.Marshal(artifacts)
 		return mcp.NewToolResultText(string(body)), nil
 	}
 }
