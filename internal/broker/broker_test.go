@@ -724,3 +724,116 @@ func TestProjectNameNormalization(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentStatus(t *testing.T) {
+	b := newTestBroker(t)
+	id, err := b.RegisterAgent(AgentProfile{
+		Description:    "test agent",
+		Project:        "proj",
+		Role:           "engineer",
+		Specialization: "go",
+	})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Default status should be "idle".
+	statuses := b.GetTeamStatus("proj")
+	if len(statuses) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(statuses))
+	}
+	if statuses[0].Status != "idle" {
+		t.Fatalf("expected idle, got %q", statuses[0].Status)
+	}
+
+	// Update status to "working".
+	if _, err := b.UpdateAgentProfile(id, AgentProfile{Status: "working"}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	statuses = b.GetTeamStatus("proj")
+	if statuses[0].Status != "working" {
+		t.Fatalf("expected working, got %q", statuses[0].Status)
+	}
+}
+
+func TestSharedContext(t *testing.T) {
+	b := newTestBroker(t)
+
+	if err := b.SharedContextSet("my-project", "backend_path", "webapp/backend"); err != nil {
+		t.Fatal(err)
+	}
+	v, ok := b.SharedContextGet("my-project", "backend_path")
+	if !ok || v != "webapp/backend" {
+		t.Fatalf("expected webapp/backend, got %q ok=%v", v, ok)
+	}
+
+	m := b.SharedContextList("my-project")
+	if m["backend_path"] != "webapp/backend" {
+		t.Fatalf("list returned wrong value: %v", m)
+	}
+
+	// Delete via empty value.
+	if err := b.SharedContextSet("my-project", "backend_path", ""); err != nil {
+		t.Fatal(err)
+	}
+	_, ok = b.SharedContextGet("my-project", "backend_path")
+	if ok {
+		t.Fatal("expected key to be deleted")
+	}
+
+	// Project isolation.
+	b.SharedContextSet("proj-a", "k", "v1")
+	b.SharedContextSet("proj-b", "k", "v2")
+	va, _ := b.SharedContextGet("proj-a", "k")
+	vb, _ := b.SharedContextGet("proj-b", "k")
+	if va != "v1" || vb != "v2" {
+		t.Fatalf("project isolation broken: proj-a=%q proj-b=%q", va, vb)
+	}
+}
+
+func TestUnreadCount(t *testing.T) {
+	b := newTestBroker(t)
+	id1, _ := b.RegisterAgent(AgentProfile{Description: "a", Project: "p", Role: "r", Specialization: "s"})
+	id2, _ := b.RegisterAgent(AgentProfile{Description: "b", Project: "p", Role: "r", Specialization: "s"})
+
+	b.Send(id1, id2, "msg1")
+	b.Send(id1, id2, "msg2")
+	b.Send(id1, id2, "msg3")
+	waitForQueuedMessages(t, b, id2, 3)
+
+	if n := b.UnreadCount(id2); n != 3 {
+		t.Fatalf("expected 3 unread, got %d", n)
+	}
+	b.Fetch(id2, 2)
+	if n := b.UnreadCount(id2); n != 1 {
+		t.Fatalf("expected 1 unread after fetch(2), got %d", n)
+	}
+}
+
+func TestGetTeamStatus_ProjectFilter(t *testing.T) {
+	b := newTestBroker(t)
+	b.RegisterAgent(AgentProfile{Description: "a", Project: "project-alpha", Role: "r", Specialization: "s"})
+	b.RegisterAgent(AgentProfile{Description: "b", Project: "project-beta", Role: "r", Specialization: "s"})
+
+	results := b.GetTeamStatus("alpha")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result for 'alpha' filter, got %d", len(results))
+	}
+	if !strings.Contains(results[0].Project, "alpha") {
+		t.Fatalf("expected alpha project, got %q", results[0].Project)
+	}
+}
+
+func TestWaitForAgents_Success(t *testing.T) {
+	b := newTestBroker(t)
+	b.RegisterAgent(AgentProfile{Description: "a", Project: "p", Role: "r", Specialization: "s"})
+	b.RegisterAgent(AgentProfile{Description: "b", Project: "p", Role: "r", Specialization: "s"})
+
+	agents, met := b.WaitForAgents("p", 2, 5)
+	if !met {
+		t.Fatal("expected threshold to be met")
+	}
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 agents, got %d", len(agents))
+	}
+}

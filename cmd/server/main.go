@@ -662,31 +662,54 @@ You are connected to relay-mesh for agent-to-agent messaging. All tools below ar
 ## AUTOMATIC: Register on session start
 As your FIRST action, call register_agent with description, project, role, specialization (infer from your context). Save the returned agent_id -- you need it for ALL subsequent calls. Do this BEFORE any other work.
 
-## Workflow (after registration)
-1. Discover: Call list_agents or find_agents (supports fuzzy search) to find teammates.
-2. Message: Call send_message (from=your_agent_id, to=recipient_agent_id, body=message).
-3. Check Inbox: Call fetch_messages (agent_id=your_agent_id) after each task, before starting new work, or when waiting.
-4. Broadcast: Call broadcast_message (from, body, optional: project/role/query filters).
-5. Update Profile: Call update_agent_profile when your info changes.
-
 ## IMMEDIATE: After registration completes
-You MUST do these steps before starting any other work:
-1. Call list_agents to discover all registered teammates
-2. Call send_message to introduce yourself to the team lead (or broadcast_message if no lead found)
-3. Call fetch_messages to check if anyone has already assigned you work
-Only after completing these 3 steps should you begin your primary task.
+Do these steps BEFORE starting any other work:
+1. Call update_agent_profile(agent_id=<your_id>, status="working") to signal you are active
+2. Call wait_for_agents(project="<your-project>", min_count=<expected team size>, timeout_seconds=60) to wait for teammates
+3. Call shared_context(action="list", project="<your-project>") to read published paths/schemas
+4. Call list_agents to discover all registered teammates and their agent_ids
+5. Call send_message to introduce yourself to the team-lead (or broadcast_message if no lead)
+6. Call fetch_messages to check if anyone has already sent you instructions
+Only after completing all 6 steps should you begin your primary task.
 
-## When to Check Messages
-- After completing each task or deliverable
-- Before starting a new task
-- When waiting for a teammate
-- NOT in a tight loop -- once every few minutes
+## Shared Context: Before You Code
+Before writing any files, exchange structural context:
+1. Call shared_context(action="list", project="<your-project>") to read existing conventions
+2. Publish YOUR paths before coding: shared_context(action="set", project=..., key="<role>_path", value="<your directory>")
+3. When importing from a teammate's code: read their published path first, do NOT guess
+
+## When to Check Messages (MANDATORY)
+- Call fetch_messages every 3 minutes OR after every 5 tool calls -- whichever comes first
+- Even when push delivery is active -- push is best-effort, fetch is guaranteed
+- After completing each file or task deliverable
+- Before starting a new task (priorities may have changed)
+
+## Completing Your Work
+1. Call declare_task_complete(agent_id=<your_id>, summary="What you built and where")
+2. Call update_agent_profile(agent_id=<your_id>, status="done")
+3. Send a final summary message to team-lead
+Team-lead ONLY: call check_project_readiness(project=...) before broadcasting project complete.
+
+## Tools Reference
+- register_agent(description, project, role, specialization, name?, session_id?) -- register yourself
+- list_agents() -- see all agents
+- find_agents(query?, project?, role?, specialization?) -- fuzzy search
+- send_message(from, to, body) -- direct message; response includes recipient_unread count
+- broadcast_message(from, body, project?, query?) -- group message; warns if 0 recipients
+- fetch_messages(agent_id, max?) -- drain inbox; response includes remaining count
+- update_agent_profile(agent_id, status?) -- update profile; status: idle|working|blocked|done
+- get_team_status(project?) -- all agents' status, last_seen, unread_messages
+- shared_context(action, project, key?, value?) -- publish/read paths, schemas, API contracts
+- wait_for_agents(project, min_count?, timeout_seconds?) -- wait for N teammates to register
+- declare_task_complete(agent_id, summary?) -- mark your work done
+- check_project_readiness(project) -- check if all agents are done (team-lead uses before closing)
+- bind_session(agent_id, session_id?) -- bind for push delivery
+- fetch_message_history(agent_id) -- durable message history
 
 ## Message Etiquette
-1. When you receive a message, acknowledge it visibly before acting
-2. After processing, post a completion summary (what changed, next steps)
+1. Acknowledge received messages before acting
+2. Post completion summaries after finishing work
 3. Never process relay messages silently
-4. If a message conflicts with your current task, ask the user first
 `
 
 func installClaudeCode() error {
@@ -1243,6 +1266,7 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 		mcp.WithString("github", mcp.Description("Updated GitHub handle/org.")),
 		mcp.WithString("branch", mcp.Description("Updated branch.")),
 		mcp.WithString("specialization", mcp.Description("Updated specialization.")),
+		mcp.WithString("status", mcp.Description("Agent status: idle, working, blocked, or done.")),
 	)
 	findAgentsTool := mcp.NewTool(
 		"find_agents",
@@ -1295,6 +1319,37 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 		mcp.WithDescription("Get the currently bound session and harness for an agent_id."),
 		mcp.WithString("agent_id", mcp.Required(), mcp.Description("Agent id to resolve.")),
 	)
+	getTeamStatusTool := mcp.NewTool(
+		"get_team_status",
+		mcp.WithDescription("Get current status of all agents on a project (idle/working/blocked/done), last activity, and unread message count. Call before declaring project complete."),
+		mcp.WithString("project", mcp.Description("Project name filter. Leave empty to return all agents.")),
+	)
+	sharedContextTool := mcp.NewTool(
+		"shared_context",
+		mcp.WithDescription("Publish or read shared key-value context visible to all agents on the project. Use to share file paths, API endpoints, and schemas before coding. Read before importing to avoid path mismatches."),
+		mcp.WithString("action", mcp.Required(), mcp.Description("Action: set, get, or list.")),
+		mcp.WithString("project", mcp.Required(), mcp.Description("Project name.")),
+		mcp.WithString("key", mcp.Description("Key to set or get (required for set/get).")),
+		mcp.WithString("value", mcp.Description("Value to store (for set). Empty string deletes the key.")),
+	)
+	waitForAgentsTool := mcp.NewTool(
+		"wait_for_agents",
+		mcp.WithDescription("Wait until min_count agents have registered for a project. Call right after registering, before your first broadcast, to prevent 0-recipient race conditions."),
+		mcp.WithString("project", mcp.Required(), mcp.Description("Project name to watch.")),
+		mcp.WithString("min_count", mcp.Description("Minimum number of agents to wait for (default 2).")),
+		mcp.WithString("timeout_seconds", mcp.Description("Max seconds to wait (default 60).")),
+	)
+	declareCompleteTool := mcp.NewTool(
+		"declare_task_complete",
+		mcp.WithDescription("Declare that your assigned work is complete. Sets your status to 'done' so the team-lead can track overall progress."),
+		mcp.WithString("agent_id", mcp.Required(), mcp.Description("Your agent_id.")),
+		mcp.WithString("summary", mcp.Description("Brief summary of what you completed.")),
+	)
+	checkReadinessTool := mcp.NewTool(
+		"check_project_readiness",
+		mcp.WithDescription("Check whether all agents on a project have declared completion. Team-lead MUST call this before broadcasting project complete."),
+		mcp.WithString("project", mcp.Required(), mcp.Description("Project name to check.")),
+	)
 
 	s.AddTool(registerTool, registerHandler(b, resolver))
 	s.AddTool(listTool, listHandler(b))
@@ -1306,6 +1361,11 @@ func buildMCPServer(b *broker.Broker, registry *push.Registry, resolver *opencod
 	s.AddTool(fetchHistoryTool, fetchHistoryHandler(b))
 	s.AddTool(bindSessionTool, bindSessionHandler(b))
 	s.AddTool(getBindingTool, getSessionBindingHandler(b))
+	s.AddTool(getTeamStatusTool, getTeamStatusHandler(b))
+	s.AddTool(sharedContextTool, sharedContextHandler(b))
+	s.AddTool(waitForAgentsTool, waitForAgentsHandler(b))
+	s.AddTool(declareCompleteTool, declareCompleteHandler(b))
+	s.AddTool(checkReadinessTool, checkReadinessHandler(b))
 	return s
 }
 
@@ -1391,6 +1451,7 @@ func updateProfileHandler(b *broker.Broker) server.ToolHandlerFunc {
 			GitHub:         req.GetString("github", ""),
 			Branch:         req.GetString("branch", ""),
 			Specialization: req.GetString("specialization", ""),
+			Status:         req.GetString("status", ""),
 		}
 		updated, err := b.UpdateAgentProfile(agentID, patch)
 		if err != nil {
@@ -1455,7 +1516,15 @@ func sendHandler(b *broker.Broker, registry *push.Registry) server.ToolHandlerFu
 				}
 			}
 		}
-		body, _ := json.Marshal(msg)
+		out := map[string]any{
+			"id":               msg.ID,
+			"from":             msg.From,
+			"to":               msg.To,
+			"body":             msg.Body,
+			"created_at":       msg.CreatedAt,
+			"recipient_unread": b.UnreadCount(to),
+		}
+		body, _ := json.Marshal(out)
 		return mcp.NewToolResultText(string(body)), nil
 	}
 }
@@ -1480,7 +1549,12 @@ func fetchHandler(b *broker.Broker) server.ToolHandlerFunc {
 		for _, m := range messages {
 			slog.Info("message delivered", "agent_id", agentID, "id", m.ID, "from", m.From, "body", m.Body)
 		}
-		body, _ := json.Marshal(messages)
+		out := map[string]any{
+			"messages":  messages,
+			"count":     len(messages),
+			"remaining": b.UnreadCount(agentID),
+		}
+		body, _ := json.Marshal(out)
 		return mcp.NewToolResultText(string(body)), nil
 	}
 }
@@ -1533,6 +1607,16 @@ func broadcastHandler(b *broker.Broker, registry *push.Registry) server.ToolHand
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 		slog.Info("broadcast sent", "from", from, "recipients", len(messages), "body", bodyText)
+
+		if len(messages) == 0 {
+			body, _ := json.Marshal(map[string]any{
+				"status":     "warning",
+				"message":    "Broadcast sent but reached 0 recipients. No agents match your filters yet. Call wait_for_agents first, or retry after teammates have registered.",
+				"recipients": 0,
+			})
+			return mcp.NewToolResultText(string(body)), nil
+		}
+
 		if registry != nil {
 			for _, m := range messages {
 				if sessionID, harness, ok := b.GetSessionBindingWithHarness(m.To); ok && harness != "generic" {
@@ -1544,12 +1628,19 @@ func broadcastHandler(b *broker.Broker, registry *push.Registry) server.ToolHand
 						CreatedAt: m.CreatedAt.Format(time.RFC3339),
 					}
 					if err := registry.Push(harness, sessionID, m.To, pushMsg); err != nil {
-						slog.Error("push delivery failed", "agent_id", m.To, "harness", harness, "error", err)
+						slog.Warn("broadcast push delivery failed", "from", from, "to", m.To, "harness", harness, "error", err)
+					} else {
+						slog.Info("broadcast push delivered", "from", from, "to", m.To, "harness", harness)
 					}
 				}
 			}
 		}
-		body, _ := json.Marshal(messages)
+		out := map[string]any{
+			"status":     "ok",
+			"recipients": len(messages),
+			"messages":   messages,
+		}
+		body, _ := json.Marshal(out)
 		return mcp.NewToolResultText(string(body)), nil
 	}
 }
@@ -1602,6 +1693,123 @@ func getSessionBindingHandler(b *broker.Broker) server.ToolHandlerFunc {
 			"agent_id":   agentID,
 			"session_id": sessionID,
 			"harness":    harness,
+		}
+		body, _ := json.Marshal(out)
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+func getTeamStatusHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project := req.GetString("project", "")
+		statuses := b.GetTeamStatus(project)
+		body, _ := json.Marshal(statuses)
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+func sharedContextHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		action := strings.TrimSpace(req.GetString("action", ""))
+		project := req.GetString("project", "")
+		key := req.GetString("key", "")
+		value := req.GetString("value", "")
+
+		switch action {
+		case "set":
+			if err := b.SharedContextSet(project, key, value); err != nil {
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			out := map[string]any{"ok": true, "project": project, "key": key, "value": value}
+			body, _ := json.Marshal(out)
+			return mcp.NewToolResultText(string(body)), nil
+		case "get":
+			v, found := b.SharedContextGet(project, key)
+			out := map[string]any{"found": found, "value": v}
+			body, _ := json.Marshal(out)
+			return mcp.NewToolResultText(string(body)), nil
+		case "list":
+			m := b.SharedContextList(project)
+			body, _ := json.Marshal(m)
+			return mcp.NewToolResultText(string(body)), nil
+		default:
+			return mcp.NewToolResultError("action must be set, get, or list"), nil
+		}
+	}
+}
+
+func waitForAgentsHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project := req.GetString("project", "")
+		if project == "" {
+			return mcp.NewToolResultError("project is required"), nil
+		}
+		minCount := 2
+		if s := req.GetString("min_count", ""); s != "" {
+			if n, err := strconv.Atoi(s); err == nil {
+				minCount = n
+			}
+		}
+		timeoutSec := 60
+		if s := req.GetString("timeout_seconds", ""); s != "" {
+			if n, err := strconv.Atoi(s); err == nil {
+				timeoutSec = n
+			}
+		}
+		agents, met := b.WaitForAgents(project, minCount, timeoutSec)
+		out := map[string]any{
+			"met":    met,
+			"count":  len(agents),
+			"agents": agents,
+		}
+		body, _ := json.Marshal(out)
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+func declareCompleteHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		agentID := req.GetString("agent_id", "")
+		if agentID == "" {
+			return mcp.NewToolResultError("agent_id is required"), nil
+		}
+		summary := req.GetString("summary", "")
+		if _, err := b.UpdateAgentProfile(agentID, broker.AgentProfile{Status: "done"}); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		slog.Info("agent declared task complete", "agent_id", agentID, "summary", summary)
+		out := map[string]any{"ok": true, "agent_id": agentID, "status": "done", "summary": summary}
+		body, _ := json.Marshal(out)
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+func checkReadinessHandler(b *broker.Broker) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project := req.GetString("project", "")
+		if project == "" {
+			return mcp.NewToolResultError("project is required"), nil
+		}
+		statuses := b.GetTeamStatus(project)
+		doneCount := 0
+		type pendingEntry struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			Status string `json:"status"`
+		}
+		pending := make([]pendingEntry, 0)
+		for _, s := range statuses {
+			if s.Status == "done" {
+				doneCount++
+			} else {
+				pending = append(pending, pendingEntry{ID: s.ID, Name: s.Name, Status: s.Status})
+			}
+		}
+		out := map[string]any{
+			"ready":          len(pending) == 0 && len(statuses) > 0,
+			"total_agents":   len(statuses),
+			"done_count":     doneCount,
+			"pending_agents": pending,
 		}
 		body, _ := json.Marshal(out)
 		return mcp.NewToolResultText(string(body)), nil

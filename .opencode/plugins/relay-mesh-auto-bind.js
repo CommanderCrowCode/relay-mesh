@@ -16,10 +16,21 @@ Save the returned agent_id — you need it for ALL subsequent relay-mesh calls. 
 
 ## IMMEDIATE: After registration completes
 Do these steps BEFORE starting any other work:
-1. Call list_agents to discover all registered teammates and their agent_ids
-2. If a team lead exists, call send_message to introduce yourself (e.g., "I'm [name], ready to work on [area]"). Otherwise call broadcast_message to announce your presence to all teammates
-3. Call fetch_messages to check if anyone has already sent you work or instructions
-Only after completing all 3 steps should you begin your primary task.
+1. Call update_agent_profile(agent_id=<your_id>, status="working") to signal you are active
+2. Call wait_for_agents(project="<your-project>", min_count=<expected team size>, timeout_seconds=60) to wait for teammates to register
+3. Call shared_context(action="list", project="<your-project>") to read published paths/schemas
+4. Call list_agents to discover all registered teammates and their agent_ids
+5. Call send_message to introduce yourself to the team-lead (or broadcast_message if no lead)
+6. Call fetch_messages to check if anyone has already sent you instructions
+Only after completing all 6 steps should you begin your primary task.
+
+## Shared Context: Before You Code
+Before writing any files, exchange structural context with teammates:
+1. Call shared_context(action="list", project="<your-project>") to read existing conventions
+2. Publish YOUR paths and interfaces BEFORE coding:
+   - shared_context(action="set", project=..., key="<role>_path", value="<your working directory>")
+   - shared_context(action="set", project=..., key="<role>_api_prefix", value="/api/v1/...") if applicable
+3. When importing from a teammate's code: read their published path, do NOT guess
 
 ## Core Workflow (after registration)
 1. DISCOVER teammates: call list_agents or find_agents(query="backend") to get their agent_ids
@@ -27,16 +38,34 @@ Only after completing all 3 steps should you begin your primary task.
 3. CHECK INBOX: call fetch_messages(agent_id=your_agent_id) to read pending messages
 4. BROADCAST: call broadcast_message(from=your_agent_id, body="...", project="...") for group updates
 
-## When to Check Messages
-- After completing each task or deliverable
-- Before starting a new task (in case priorities changed)
-- When waiting for a teammate's work
-- Do NOT call fetch_messages in a tight loop — once every few minutes is enough
+## When to Check Messages (MANDATORY)
+- Call fetch_messages every 3 minutes OR after every 5 tool calls — whichever comes first
+- Even when push delivery is active — push is best-effort, fetch is guaranteed
+- After completing each file or task deliverable
+- Before starting a new task (priorities may have changed)
+- When waiting for a teammate's output
+
+## Completing Your Work
+When your implementation is done:
+1. Call declare_task_complete(agent_id=<your_id>, summary="What you built and where")
+2. Call update_agent_profile(agent_id=<your_id>, status="done")
+3. Send a final summary message to team-lead
+
+Team-lead only — before declaring project complete:
+1. Call check_project_readiness(project="<your-project>")
+2. If any agents are NOT done: message them asking for status
+3. ONLY broadcast project completion when check_project_readiness returns ready: true
 
 ## Message Etiquette
 - When you receive a message, acknowledge it visibly before acting on it
 - After processing, post a completion summary (what changed, outcome, next steps)
 - If a relay message conflicts with your current task, ask the user before acting
+
+## CRITICAL: Fetch Messages Regularly
+- Call \`fetch_messages\` every 3 minutes regardless of push delivery
+- Push delivery is best-effort; fetch is the guaranteed path
+- Keep a count: every 5 non-relay tool calls, stop and call \`fetch_messages\`
+- After any file write or test run, call \`fetch_messages\` before continuing
 `;
 
 const maybeInjectProtocolContext = async (client, sessionID, reason) => {
@@ -77,6 +106,8 @@ const parseAgentIDFromToolOutput = (raw) => {
 
 export const RelayMeshAutoBind = async ({ client }) => {
   const protocolInjectedBySession = new Set();
+  const toolCallCount = new Map(); // sessionID → count since last fetch_messages
+  const sessionAgentMap = new Map(); // sessionID → agentID
 
   return {
     "tool.execute.before": async (input, output) => {
@@ -107,6 +138,36 @@ export const RelayMeshAutoBind = async ({ client }) => {
       if (!protocolInjectedBySession.has(sessionID)) {
         protocolInjectedBySession.add(sessionID);
         await maybeInjectProtocolContext(client, sessionID, `register_agent:${agentID}`);
+      }
+
+      // Track session→agent mapping after successful register
+      if (looksLikeRelayRegisterTool(input?.tool)) {
+        const registeredAgentID = parseAgentIDFromToolOutput(output?.output);
+        if (registeredAgentID && sessionID) {
+          sessionAgentMap.set(sessionID, registeredAgentID);
+          toolCallCount.set(sessionID, 0);
+        }
+      }
+
+      // Periodic fetch reminder every 5 non-relay tool calls
+      if (sessionAgentMap.has(sessionID)) {
+        const toolName = String(input?.tool || "").toLowerCase();
+        const isFetchMessages = toolName.includes("fetch_messages");
+        const isRelayTool = toolName.includes("relay-mesh") || toolName.includes("relay_mesh");
+
+        if (isFetchMessages) {
+          toolCallCount.set(sessionID, 0);
+        } else if (!isRelayTool) {
+          const count = (toolCallCount.get(sessionID) || 0) + 1;
+          toolCallCount.set(sessionID, count);
+          if (count % 5 === 0) {
+            await maybeInjectProtocolContext(
+              client,
+              sessionID,
+              `periodic-fetch-reminder: ${count} tool calls since last fetch_messages — call fetch_messages now`
+            );
+          }
+        }
       }
     },
 

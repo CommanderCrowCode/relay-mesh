@@ -34,6 +34,19 @@ type AgentProfile struct {
 	GitHub         string `json:"github,omitempty"`
 	Branch         string `json:"branch,omitempty"`
 	Specialization string `json:"specialization"`
+	Status         string `json:"status,omitempty"` // "idle" | "working" | "blocked" | "done"
+}
+
+// AgentStatusEntry is a snapshot of an agent's current state for team coordination.
+type AgentStatusEntry struct {
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Role           string    `json:"role"`
+	Project        string    `json:"project"`
+	Status         string    `json:"status"`
+	LastSeen       time.Time `json:"last_seen"`
+	LastFetch      time.Time `json:"last_fetch"`
+	UnreadMessages int       `json:"unread_messages"`
 }
 
 type AgentSearchFilter struct {
@@ -51,6 +64,8 @@ type agentState struct {
 	SessionID string
 	Harness   string // "opencode", "claude-code", "codex", "generic"
 	Queue     []Message
+	LastSeen  time.Time
+	LastFetch time.Time
 }
 
 // Broker stores anonymous agent routing state and uses NATS as transport.
@@ -60,7 +75,8 @@ type Broker struct {
 	js           nats.JetStreamContext
 	agents       map[string]*agentState
 	subs         map[string]*nats.Subscription
-	sessionIndex map[string]string // session_id → agent_id
+	sessionIndex map[string]string            // session_id → agent_id
+	contextStore map[string]map[string]string // project → key → value
 }
 
 func New(natsURL string) (*Broker, error) {
@@ -83,6 +99,7 @@ func New(natsURL string) (*Broker, error) {
 		agents:       make(map[string]*agentState),
 		subs:         make(map[string]*nats.Subscription),
 		sessionIndex: make(map[string]string),
+		contextStore: make(map[string]map[string]string),
 	}, nil
 }
 
@@ -119,7 +136,10 @@ func (b *Broker) RegisterAgent(profile AgentProfile) (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	state := &agentState{ID: id, Profile: profile, Subject: subject}
+	if profile.Status == "" {
+		profile.Status = "idle"
+	}
+	state := &agentState{ID: id, Profile: profile, Subject: subject, LastSeen: time.Now().UTC()}
 	sub, err := b.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var incoming Message
 		if err := json.Unmarshal(msg.Data, &incoming); err != nil {
@@ -185,6 +205,7 @@ func (b *Broker) RegisterOrUpdateBySession(sessionID string, profile AgentProfil
 		}
 		// Re-bind session to preserve harness binding.
 		agent.SessionID = sessionID
+		agent.LastSeen = time.Now().UTC()
 		b.mu.Unlock()
 		return existingID, false, nil
 	}
@@ -219,6 +240,8 @@ func (b *Broker) ListAgents() []map[string]string {
 			"github":         a.Profile.GitHub,
 			"branch":         a.Profile.Branch,
 			"specialization": a.Profile.Specialization,
+			"status":         a.Profile.Status,
+			"last_seen":      a.LastSeen.Format(time.RFC3339),
 		})
 	}
 	return out
@@ -253,6 +276,8 @@ func (b *Broker) UpdateAgentProfile(agentID string, patch AgentProfile) (map[str
 		"github":         agent.Profile.GitHub,
 		"branch":         agent.Profile.Branch,
 		"specialization": agent.Profile.Specialization,
+		"status":         agent.Profile.Status,
+		"last_seen":      agent.LastSeen.Format(time.RFC3339),
 	}, nil
 }
 
@@ -317,6 +342,8 @@ func (b *Broker) FindAgents(filter AgentSearchFilter) []map[string]string {
 			"github":         a.Profile.GitHub,
 			"branch":         a.Profile.Branch,
 			"specialization": a.Profile.Specialization,
+			"status":         a.Profile.Status,
+			"last_seen":      a.LastSeen.Format(time.RFC3339),
 		})
 		if len(out) >= filter.Limit {
 			break
@@ -386,6 +413,9 @@ func (b *Broker) Send(from, to, body string) (Message, error) {
 	b.mu.Lock()
 	fromAgent := b.agents[from]
 	toAgent := b.agents[to]
+	if fromAgent != nil {
+		fromAgent.LastSeen = time.Now().UTC()
+	}
 	b.mu.Unlock()
 
 	if fromAgent == nil {
@@ -481,6 +511,7 @@ func (b *Broker) Broadcast(from, body string, filter AgentSearchFilter) ([]Messa
 		b.mu.Unlock()
 		return nil, fmt.Errorf("sender agent not found: %s", from)
 	}
+	b.agents[from].LastSeen = time.Now().UTC()
 	type targetCandidate struct {
 		id    string
 		score int
@@ -535,6 +566,9 @@ func (b *Broker) Fetch(agentID string, max int) ([]Message, error) {
 	if agent == nil {
 		return nil, fmt.Errorf("agent not found: %s", agentID)
 	}
+	now := time.Now().UTC()
+	agent.LastSeen = now
+	agent.LastFetch = now
 	if len(agent.Queue) == 0 {
 		return []Message{}, nil
 	}
@@ -546,6 +580,115 @@ func (b *Broker) Fetch(agentID string, max int) ([]Message, error) {
 	copy(out, agent.Queue[:max])
 	agent.Queue = agent.Queue[max:]
 	return out, nil
+}
+
+// UnreadCount returns the number of pending messages in an agent's queue.
+func (b *Broker) UnreadCount(agentID string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	a := b.agents[agentID]
+	if a == nil {
+		return 0
+	}
+	return len(a.Queue)
+}
+
+// GetTeamStatus returns a snapshot of all agents matching the project filter.
+// If project is empty, all agents are returned.
+func (b *Broker) GetTeamStatus(project string) []AgentStatusEntry {
+	project = strings.ToLower(strings.TrimSpace(project))
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]AgentStatusEntry, 0, len(b.agents))
+	for _, a := range b.agents {
+		if project != "" && !strings.Contains(strings.ToLower(a.Profile.Project), project) {
+			continue
+		}
+		out = append(out, AgentStatusEntry{
+			ID:             a.ID,
+			Name:           a.Profile.Name,
+			Role:           a.Profile.Role,
+			Project:        a.Profile.Project,
+			Status:         a.Profile.Status,
+			LastSeen:       a.LastSeen,
+			LastFetch:      a.LastFetch,
+			UnreadMessages: len(a.Queue),
+		})
+	}
+	return out
+}
+
+// SharedContextSet stores a key-value pair scoped to a project.
+// Passing an empty value deletes the key.
+func (b *Broker) SharedContextSet(project, key, value string) error {
+	project = normalizeProjectName(project)
+	key = strings.TrimSpace(key)
+	if project == "" {
+		return fmt.Errorf("project is required")
+	}
+	if key == "" {
+		return fmt.Errorf("key is required")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.contextStore[project] == nil {
+		b.contextStore[project] = make(map[string]string)
+	}
+	if value == "" {
+		delete(b.contextStore[project], key)
+	} else {
+		b.contextStore[project][key] = value
+	}
+	return nil
+}
+
+// SharedContextGet retrieves a value from the shared project context.
+func (b *Broker) SharedContextGet(project, key string) (string, bool) {
+	project = normalizeProjectName(project)
+	key = strings.TrimSpace(key)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.contextStore[project] == nil {
+		return "", false
+	}
+	v, ok := b.contextStore[project][key]
+	return v, ok
+}
+
+// SharedContextList returns a copy of all key-value pairs for a project.
+func (b *Broker) SharedContextList(project string) map[string]string {
+	project = normalizeProjectName(project)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	src := b.contextStore[project]
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// WaitForAgents blocks until at least minCount agents are registered for the
+// project, or until timeoutSec seconds have elapsed. Returns the agents found
+// and whether the threshold was met.
+func (b *Broker) WaitForAgents(project string, minCount int, timeoutSec int) ([]AgentStatusEntry, bool) {
+	if minCount <= 0 {
+		minCount = 2
+	}
+	if timeoutSec <= 0 {
+		timeoutSec = 60
+	}
+	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	for {
+		agents := b.GetTeamStatus(project)
+		if len(agents) >= minCount {
+			return agents, true
+		}
+		if time.Now().After(deadline) {
+			return agents, false
+		}
+		time.Sleep(2 * time.Second)
+	}
 }
 
 func randomID(prefix string) (string, error) {
@@ -586,6 +729,7 @@ func normalizeProfile(p AgentProfile) AgentProfile {
 	p.GitHub = strings.TrimSpace(p.GitHub)
 	p.Branch = strings.TrimSpace(p.Branch)
 	p.Specialization = strings.TrimSpace(p.Specialization)
+	p.Status = strings.TrimSpace(p.Status)
 	return p
 }
 
@@ -660,6 +804,9 @@ func applyProfilePatch(dst *AgentProfile, patch AgentProfile) {
 	}
 	if patch.Specialization != "" {
 		dst.Specialization = patch.Specialization
+	}
+	if patch.Status != "" {
+		dst.Status = patch.Status
 	}
 }
 
