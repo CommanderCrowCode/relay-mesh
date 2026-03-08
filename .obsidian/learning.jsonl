@@ -1,3 +1,4 @@
 {"task_id":"task-0001","title":"Fix race condition in RegisterOrUpdateBySession","status":"completed","duration_secs":64.522602135,"tokens":0,"failure_reason":null,"files_modified":0,"timestamp":"2026-03-08T05:56:48.810250146Z"}
 {"task_id":"task-0002","title":"Add delivery log pruning to prevent memory leak","status":"completed","duration_secs":33.035420652,"tokens":0,"failure_reason":null,"files_modified":0,"timestamp":"2026-03-08T05:57:23.408305383Z"}
 {"task_id":"task-0003","title":"Split cmd/server/main.go into separate files","status":"completed","duration_secs":829.356601281,"tokens":0,"failure_reason":null,"files_modified":0,"timestamp":"2026-03-08T06:11:13.901052617Z"}
+{"task_id":"task-0004","title":"Optimize FetchHistory with subject-filtered JetStream consumer","status":"completed","duration_secs":47.819948719,"tokens":0,"failure_reason":null,"files_modified":0,"timestamp":"2026-03-08T06:12:02.835060399Z"}
