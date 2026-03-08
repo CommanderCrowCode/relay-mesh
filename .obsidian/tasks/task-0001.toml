@@ -1,0 +1,38 @@
+id = "task-0001"
+title = "Fix race condition in RegisterOrUpdateBySession"
+description = "In broker.go, RegisterOrUpdateBySession checks the sessionIndex before acquiring the lock. If an agent is pruned between the index check and the update, it causes a nil pointer dereference. Fix by moving the mutex lock before the session index lookup so the entire check-and-update is atomic."
+status = "completed"
+created_at = "2026-03-08T05:55:36.345098607Z"
+claimed_by = "f485534f-40d0-47de-9865-a172033e5fc8"
+depends_on = []
+tags = []
+previous_attempts = 0
+needs_decomposition = false
+needs_review = false
+started_at = "2026-03-08T05:55:44.278339947Z"
+heartbeat_at = "2026-03-08T05:55:44.278339947Z"
+total_tokens_burned = 0
+priority = 0
+priority_source = "manual"
+claim_token = "767aa211-736a-4cc9-906d-2bd2c164b616"
+needs_rework = false
+rework_attempts = 0
+rework_count = 0
+
+[result]
+summary = """
+It seems the file write permission hasn't been granted yet. Could you approve the edit to `/home/tanwa/relay-mesh/internal/broker/broker.go`? 
+
+Here's the plan:
+
+1. **Extract `registerAgentLocked`** — moves the core registration logic (ID generation, NATS subscribe, state insertion) into an internal method that assumes the mutex is already held
+2. **Simplify `RegisterAgent`** — now just validates, locks, and calls `registerAgentLocked`
+3. **Rewrite `RegisterOrUpdateBySession`** — holds the lock for the entire operation, calling `registerAgentLocked` directly instead of dropping/reacquiring the lock
+
+This eliminates the window where a prune could happen between the session index check and the agent update.
+"""
+files_modified = []
+files_created = []
+duration_seconds = 64
+tokens_used = 0
+completed_at = "2026-03-08T05:56:48.807364926Z"

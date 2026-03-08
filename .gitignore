@@ -1,1 +1,7 @@
 .run/
+
+# Obsidian (auto-generated)
+.obsidian/logs/
+.obsidian/locks/
+.obsidian/chat/
+.worktrees/

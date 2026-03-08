@@ -1,0 +1,17 @@
+id = "task-0004"
+title = "Optimize FetchHistory with subject-filtered JetStream consumer"
+description = "FetchHistory iterates ALL messages in the RELAY_MESSAGES stream to find messages for a single agent (O(n) total messages). Use a subject-filtered JetStream consumer (FilterSubject: relay.agent.<id>) instead of scanning the entire stream. This will degrade badly as message volume grows with 7-day retention."
+status = "pending"
+created_at = "2026-03-08T05:55:36.350984290Z"
+claimed_by = ""
+depends_on = []
+tags = []
+previous_attempts = 0
+needs_decomposition = false
+needs_review = false
+total_tokens_burned = 0
+priority = 1
+priority_source = "manual"
+needs_rework = false
+rework_attempts = 0
+rework_count = 0
