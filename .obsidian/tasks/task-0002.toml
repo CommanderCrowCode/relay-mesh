@@ -1,17 +1,36 @@
 id = "task-0002"
 title = "Add delivery log pruning to prevent memory leak"
 description = "The deliveryLog map in broker.go grows unbounded — old DeliveryRecord entries are never cleaned up. Add a PruneDeliveryLog() method (or extend PruneStaleAgents) to remove delivery records older than a configurable TTL (e.g., 24h). This is an operational time bomb for long-running servers."
-status = "pending"
+status = "completed"
 created_at = "2026-03-08T05:55:36.347702204Z"
-claimed_by = ""
+claimed_by = "4f712399-3946-460b-8ff9-39f5bd96b954"
 depends_on = []
 tags = []
 previous_attempts = 0
 needs_decomposition = false
 needs_review = false
+started_at = "2026-03-08T05:56:50.362165Z"
+heartbeat_at = "2026-03-08T05:56:50.362165Z"
 total_tokens_burned = 0
 priority = 0
 priority_source = "manual"
+claim_token = "d1334e44-d908-4587-ad13-4a3969171872"
 needs_rework = false
 rework_attempts = 0
 rework_count = 0
+
+[result]
+summary = """
+I need write permission to edit `internal/broker/broker.go`. Could you approve the edit? I'm adding a `PruneDeliveryLog` method right before `GetMessageStatus` (line 791) that:
+
+1. Takes a `maxAge time.Duration` (defaults to 24h if <= 0)
+2. Deletes all `DeliveryRecord` entries with `SentAt` older than `maxAge`
+3. Returns the count of pruned records
+
+I'll also add a test for it in `broker_test.go`. Please approve the file write permission so I can proceed.
+"""
+files_modified = []
+files_created = []
+duration_seconds = 33
+tokens_used = 0
+completed_at = "2026-03-08T05:57:23.406633139Z"
