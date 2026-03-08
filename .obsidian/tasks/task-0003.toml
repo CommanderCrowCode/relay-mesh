@@ -1,0 +1,17 @@
+id = "task-0003"
+title = "Split cmd/server/main.go into separate files"
+description = "main.go is 2,029 lines — far beyond maintainable size. Extract into: cli_install.go (install/uninstall commands), cli_mesh.go (up/down orchestration), handlers.go (MCP tool handler implementations), and keep main.go as just the entrypoint + CLI dispatch. No behavior changes, pure structural refactor."
+status = "pending"
+created_at = "2026-03-08T05:55:36.349031370Z"
+claimed_by = ""
+depends_on = []
+tags = []
+previous_attempts = 0
+needs_decomposition = false
+needs_review = false
+total_tokens_burned = 0
+priority = 1
+priority_source = "manual"
+needs_rework = false
+rework_attempts = 0
+rework_count = 0

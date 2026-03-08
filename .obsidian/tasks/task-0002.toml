@@ -1,0 +1,17 @@
+id = "task-0002"
+title = "Add delivery log pruning to prevent memory leak"
+description = "The deliveryLog map in broker.go grows unbounded — old DeliveryRecord entries are never cleaned up. Add a PruneDeliveryLog() method (or extend PruneStaleAgents) to remove delivery records older than a configurable TTL (e.g., 24h). This is an operational time bomb for long-running servers."
+status = "pending"
+created_at = "2026-03-08T05:55:36.347702204Z"
+claimed_by = ""
+depends_on = []
+tags = []
+previous_attempts = 0
+needs_decomposition = false
+needs_review = false
+total_tokens_burned = 0
+priority = 0
+priority_source = "manual"
+needs_rework = false
+rework_attempts = 0
+rework_count = 0
