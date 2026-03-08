@@ -1,17 +1,82 @@
 id = "task-0004"
 title = "Optimize FetchHistory with subject-filtered JetStream consumer"
 description = "FetchHistory iterates ALL messages in the RELAY_MESSAGES stream to find messages for a single agent (O(n) total messages). Use a subject-filtered JetStream consumer (FilterSubject: relay.agent.<id>) instead of scanning the entire stream. This will degrade badly as message volume grows with 7-day retention."
-status = "pending"
+status = "completed"
 created_at = "2026-03-08T05:55:36.350984290Z"
-claimed_by = ""
+claimed_by = "a8c2cbfc-65c1-42ff-97d8-7f59b95d5d01"
 depends_on = []
 tags = []
 previous_attempts = 0
 needs_decomposition = false
 needs_review = false
+started_at = "2026-03-08T06:11:15.003945904Z"
+heartbeat_at = "2026-03-08T06:11:15.003945904Z"
 total_tokens_burned = 0
 priority = 1
 priority_source = "manual"
+claim_token = "d73efdab-210f-4384-9795-d822be30aa0c"
 needs_rework = false
 rework_attempts = 0
 rework_count = 0
+
+[result]
+summary = """
+It seems file write permissions aren't being granted. Could you allow the edit to `internal/broker/broker.go`? The change replaces the `FetchHistory` method (lines 493-540) to use a subject-filtered JetStream ordered consumer instead of iterating all stream messages.
+
+Here's the new implementation:
+
+```go
+func (b *Broker) FetchHistory(agentID string, max int) ([]Message, error) {
+\tif max <= 0 {
+\t\tmax = 20
+\t}
+
+\tb.mu.Lock()
+\tagent := b.agents[agentID]
+\tb.mu.Unlock()
+\tif agent == nil {
+\t\treturn nil, fmt.Errorf("agent not found: %s", agentID)
+\t}
+
+\t// Use a subject-filtered ephemeral ordered consumer to only read messages
+\t// destined for this agent, instead of scanning the entire stream.
+\tsubject := fmt.Sprintf("%s.%s", subjectPrefix, agentID)
+\tsub, err := b.js.SubscribeSync(subject, nats.OrderedConsumer())
+\tif err != nil {
+\t\treturn []Message{}, nil
+\t}
+\tdefer func() { _ = sub.Unsubscribe() }()
+
+\t// Collect all available messages for this subject, then return the
+\t// last `max` in oldest-to-newest order.
+\tall := make([]Message, 0, max)
+\tfor {
+\t\traw, err := sub.NextMsg(500 * time.Millisecond)
+\t\tif err != nil {
+\t\t\tbreak // timeout or other error — done reading
+\t\t}
+\t\tvar msg Message
+\t\tif err := json.Unmarshal(raw.Data, &msg); err != nil {
+\t\t\tcontinue
+\t\t}
+\t\tall = append(all, msg)
+\t}
+
+\tif len(all) > max {
+\t\tall = all[len(all)-max:]
+\t}
+\treturn all, nil
+}
+```
+
+**What changed:**
+- **Before**: Iterated every sequence number from `lastSeq` down to `firstSeq`, calling `js.GetMsg()` for each, then filtering by `msg.To == agentID` — O(n) over all messages in the stream
+- **After**: Creates an ephemeral ordered consumer with `SubscribeSync(subject)` where `subject = relay.agent.<agentID>`. NATS server-side filtering means only messages for that agent are delivered — O(m) where m is that agent's message count
+
+Please approve the file edit and I'll verify with build + tests.
+"""
+files_modified = []
+files_created = []
+duration_seconds = 47
+tokens_used = 0
+completed_at = "2026-03-08T06:12:02.832084318Z"
